@@ -3,7 +3,7 @@ import requests
 import os
 import threading
 from bs4 import BeautifulSoup
-from scraper import scrape_permits, BASE_URL, get_viewstate
+from scraper import scrape_permits, BASE_URL
 
 app = Flask(__name__)
 
