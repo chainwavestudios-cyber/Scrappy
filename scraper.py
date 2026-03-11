@@ -41,41 +41,47 @@ async def scrape_permits_async(start_date, end_date):
             """)
             await page.wait_for_load_state('networkidle')
             await page.wait_for_timeout(2000)
-            log.info(f'URL: {page.url}')
 
-            # Debug
-            log.info(f'Page URL: {page.url}')
-            log.info(f'All frames: {[f.url for f in page.frames]}')
-            inputs = await page.eval_on_selector_all('input', 'els => els.map(e => ({id: e.id, name: e.name}))')
-            log.info(f'Inputs on page: {inputs}')
+            # Log all frames to find the right one
+            for f in page.frames:
+                log.info(f'Frame URL: {f.url}')
+
+            # Grab the Welcome.aspx frame
+            frame = next(
+                (f for f in page.frames if 'Welcome.aspx' in f.url),
+                None
+            )
+            if not frame:
+                raise Exception('Could not find Welcome.aspx frame')
+            log.info(f'Found frame: {frame.url}')
 
             log.info(f'Filling dates: {start_date} to {end_date}')
-            await page.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSStartDate', start_date)
-            await page.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSEndDate', end_date)
+            await frame.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSStartDate', start_date)
+            await frame.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSEndDate', end_date)
 
             log.info('Expanding additional criteria...')
-            await page.evaluate("""
+            await frame.evaluate("""
                 () => {
                     const links = Array.from(document.querySelectorAll('a'));
                     const expand = links.find(l => l.textContent.includes('Search Additional Criteria'));
                     if (expand) expand.click();
                 }
             """)
-            await page.wait_for_selector('select[id*="SecondaryScopeCode1"]', timeout=15000)
+            await frame.wait_for_selector('select[id*="SecondaryScopeCode1"]', timeout=15000)
 
             log.info('Selecting solar scope code...')
-            await page.select_option(
+            await frame.select_option(
                 'select[id*="SecondaryScopeCode1"]',
                 label='8002 - REN - Solar Photovoltaic Roof Mount Residential - Online'
             )
 
             log.info('Clicking search...')
-            await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
-            await page.click('a[id*="btnSearch"]')
-            await page.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
+            await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+            await frame.click('a[id*="btnSearch"]')
+            await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
             log.info('Results loaded')
 
-            html = await page.content()
+            html = await frame.content()
             soup = BeautifulSoup(html, 'lxml')
             rows = soup.select('tr.gdvPermitList_Row')
             log.info(f'Found {len(rows)} records')
