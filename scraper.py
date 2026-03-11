@@ -42,22 +42,37 @@ async def scrape_permits_async(start_date, end_date):
             await page.wait_for_load_state('networkidle')
             await page.wait_for_timeout(2000)
 
-            # Log all frames to find the right one
             for f in page.frames:
                 log.info(f'Frame URL: {f.url}')
 
-            # Grab the Welcome.aspx frame
             frame = next(
                 (f for f in page.frames if 'Welcome.aspx' in f.url),
                 None
             )
             if not frame:
-                raise Exception('Could not find Welcome.aspx frame')
-            log.info(f'Found frame: {frame.url}')
+                log.warning('Welcome.aspx frame not found, using main page')
+                frame = page
 
-            log.info(f'Filling dates: {start_date} to {end_date}')
-            await frame.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSStartDate', start_date)
-            await frame.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSEndDate', end_date)
+            log.info(f'Using frame: {frame.url}')
+
+            log.info(f'Injecting dates: {start_date} to {end_date}')
+            await frame.evaluate(f"""
+                () => {{
+                    const s = document.querySelector('[id*="txtGSStartDate"]');
+                    const e = document.querySelector('[id*="txtGSEndDate"]');
+                    if (s) {{
+                        s.value = '{start_date}';
+                        s.dispatchEvent(new Event('change'));
+                        s.dispatchEvent(new Event('blur'));
+                    }}
+                    if (e) {{
+                        e.value = '{end_date}';
+                        e.dispatchEvent(new Event('change'));
+                        e.dispatchEvent(new Event('blur'));
+                    }}
+                }}
+            """)
+            log.info('Dates injected')
 
             log.info('Expanding additional criteria...')
             await frame.evaluate("""
