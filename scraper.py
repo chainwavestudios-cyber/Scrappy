@@ -25,11 +25,12 @@ def scrape_permits(start_date, end_date):
         'Accept-Language': 'en-US,en;q=0.5',
     })
 
-    # Step 1 — Load homepage to get session cookie
+    # Step 1 — Load homepage
     log.info('Loading homepage...')
     r = session.get(f'{BASE_URL}/Default.aspx')
     soup = BeautifulSoup(r.text, 'lxml')
     viewstate = get_viewstate(soup)
+    log.info(f'Homepage status: {r.status_code}, title: {soup.title.string if soup.title else "none"}')
 
     # Step 2 — Navigate to PDS tab
     log.info('Navigating to PDS...')
@@ -39,14 +40,18 @@ def scrape_permits(start_date, end_date):
     })
     soup = BeautifulSoup(r.text, 'lxml')
     viewstate = get_viewstate(soup)
+    log.info(f'PDS tab status: {r.status_code}, title: {soup.title.string if soup.title else "none"}')
 
     # Step 3 — Navigate to Search Records
     log.info('Going to Search Records...')
     r = session.get(f'{BASE_URL}/Cap/CapHome.aspx?module=PDS&TabName=PDS')
     soup = BeautifulSoup(r.text, 'lxml')
     viewstate = get_viewstate(soup)
+    log.info(f'Search page status: {r.status_code}, title: {soup.title.string if soup.title else "none"}')
+    log.info(f'All input IDs: {[i.get("id") for i in soup.find_all("input") if i.get("id")]}')
+    log.info(f'All select IDs: {[s.get("id") for s in soup.find_all("select") if s.get("id")]}')
 
-    # Step 4 — Submit search form with dates and solar scope code
+    # Step 4 — Submit search form
     log.info(f'Searching from {start_date} to {end_date}...')
     search_data = {
         **viewstate,
@@ -58,9 +63,16 @@ def scrape_permits(start_date, end_date):
     r = session.post(f'{BASE_URL}/Cap/CapHome.aspx?module=PDS&TabName=PDS', data=search_data)
     soup = BeautifulSoup(r.text, 'lxml')
 
-    # Step 5 — Parse results table
+    log.info(f'Search response status: {r.status_code}')
+    log.info(f'Search response URL: {r.url}')
+    log.info(f'Page title after search: {soup.title.string if soup.title else "no title"}')
+
+    error = soup.select_one('.ErrorMessage, .error, #ctl00_PlaceHolderMain_ErrorMsg')
+    if error:
+        log.info(f'Error message: {error.get_text(strip=True)}')
+
     rows = soup.select('tr.gdvPermitList_Row')
-    log.info(f'Found {len(rows)} records')
+    log.info(f'Rows found: {len(rows)}')
 
     leads = []
     for row in rows:
@@ -84,7 +96,7 @@ def scrape_permits(start_date, end_date):
         }
         leads.append(lead)
 
-    # Step 6 — Deep dive each record for solar fields
+    # Step 6 — Deep dive each record
     for i, lead in enumerate(leads):
         if not lead['detailUrl']:
             continue
