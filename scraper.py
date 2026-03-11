@@ -2,6 +2,7 @@ import asyncio
 import logging
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
@@ -54,7 +55,8 @@ async def scrape_permits_async(start_date, end_date):
                     if (expand) expand.click();
                 }
             """)
-            await page.wait_for_timeout(10000)
+            # FIX 1: Wait for the actual element instead of hardcoded 10s sleep
+            await page.wait_for_selector('select[id*="SecondaryScopeCode1"]', timeout=15000)
 
             log.info('Selecting solar scope code...')
             await page.select_option(
@@ -97,9 +99,12 @@ async def scrape_permits_async(start_date, end_date):
                 if not lead['detailHref']:
                     continue
                 log.info(f'Getting details {lead["recordId"]} ({i+1}/{len(leads)})...')
+
+                detail_page = await context.new_page()
                 try:
-                    detail_page = await context.new_page()
-                    await detail_page.goto(f'{BASE_URL}/{lead["detailHref"]}', wait_until='networkidle')
+                    # FIX 2: Use urljoin to prevent double-path URLs
+                    detail_url = urljoin(BASE_URL + '/', lead['detailHref'].lstrip('/'))
+                    await detail_page.goto(detail_url, wait_until='networkidle')
 
                     await detail_page.evaluate("""
                         () => {
@@ -136,7 +141,6 @@ async def scrape_permits_async(start_date, end_date):
                     lead['kwSystemSize'] = get_field('Rounded Kilowatts Total System Size')
                     lead['electricalUpgrade'] = get_field('Electrical Service Upgrade')
                     lead['energyStorage'] = get_field('Advanced Energy Storage System')
-                    await detail_page.close()
 
                 except Exception as e:
                     log.error(f'Detail failed {lead["recordId"]}: {e}')
@@ -145,13 +149,16 @@ async def scrape_permits_async(start_date, end_date):
                     lead['electricalUpgrade'] = 'N/A'
                     lead['energyStorage'] = 'N/A'
 
+                finally:
+                    # FIX 3: Always close detail page, even if it times out
+                    await detail_page.close()
+
             return leads
 
         finally:
             await browser.close()
 
+# FIX 4: Removed dead get_viewstate function
+
 def scrape_permits(start_date, end_date):
     return asyncio.run(scrape_permits_async(start_date, end_date))
-
-def get_viewstate(soup):
-    return {}
