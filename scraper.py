@@ -82,16 +82,31 @@ async def scrape_permits_async(start_date, end_date):
                     if (expand) expand.click();
                 }
             """)
-            await frame.wait_for_selector('select[id*="SecondaryScopeCode1"]', timeout=15000)
+
+            # Wait for Primary Scope Code dropdown using exact ID from inspection
+            await frame.wait_for_selector(
+                '#ctl00_PlaceHolderMain_asiGSForm_COSD_ddl_30_0',
+                timeout=15000
+            )
+
+            # Log all available options to confirm exact label text
+            options = await frame.evaluate("""
+                () => Array.from(
+                    document.querySelector('#ctl00_PlaceHolderMain_asiGSForm_COSD_ddl_30_0').options
+                ).map(o => o.text)
+            """)
+            log.info(f'Primary Scope Code options: {options}')
 
             log.info('Selecting solar scope code...')
             await frame.select_option(
-                'select[id*="SecondaryScopeCode1"]',
-                label='8002 - REN - Solar Photovoltaic Roof Mount Residential - Online'
+                '#ctl00_PlaceHolderMain_asiGSForm_COSD_ddl_30_0',
+                label='8002-REN-Solar Photovoltaic Roof Mount Residential - Online'
             )
+            log.info('Solar scope code selected')
 
-            log.info('Clicking search...')
+            log.info('Scrolling to bottom and clicking search...')
             await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+            await frame.wait_for_timeout(1000)
             await frame.click('a[id*="btnSearch"]')
             await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
             log.info('Results loaded')
@@ -128,6 +143,7 @@ async def scrape_permits_async(start_date, end_date):
 
                 detail_page = await context.new_page()
                 try:
+                    # urljoin prevents double-path URLs
                     detail_url = urljoin(BASE_URL + '/', lead['detailHref'].lstrip('/'))
                     await detail_page.goto(detail_url, wait_until='networkidle')
 
@@ -175,6 +191,7 @@ async def scrape_permits_async(start_date, end_date):
                     lead['energyStorage'] = 'N/A'
 
                 finally:
+                    # Always close detail page even if it times out
                     await detail_page.close()
 
             return leads
