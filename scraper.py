@@ -83,6 +83,21 @@ async def scrape_permits_async(start_date, end_date):
                 }
             """)
 
+            # Debug — wait then log what's visible
+            await frame.wait_for_timeout(3000)
+            expanded = await frame.evaluate("""
+                () => {
+                    const links = Array.from(document.querySelectorAll('a'));
+                    return links.map(l => l.textContent.trim()).filter(t => t.length > 0);
+                }
+            """)
+            log.info(f'Links visible after expand: {expanded}')
+
+            selects = await frame.evaluate("""
+                () => Array.from(document.querySelectorAll('select')).map(s => s.id)
+            """)
+            log.info(f'Select elements visible: {selects}')
+
             # Wait for Primary Scope Code dropdown using exact ID from inspection
             await frame.wait_for_selector(
                 '#ctl00_PlaceHolderMain_asiGSForm_COSD_ddl_30_0',
@@ -143,7 +158,6 @@ async def scrape_permits_async(start_date, end_date):
 
                 detail_page = await context.new_page()
                 try:
-                    # urljoin prevents double-path URLs
                     detail_url = urljoin(BASE_URL + '/', lead['detailHref'].lstrip('/'))
                     await detail_page.goto(detail_url, wait_until='networkidle')
 
@@ -191,7 +205,6 @@ async def scrape_permits_async(start_date, end_date):
                     lead['energyStorage'] = 'N/A'
 
                 finally:
-                    # Always close detail page even if it times out
                     await detail_page.close()
 
             return leads
