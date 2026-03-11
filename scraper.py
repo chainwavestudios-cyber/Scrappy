@@ -43,6 +43,12 @@ async def scrape_permits_async(start_date, end_date):
             await page.wait_for_timeout(2000)
             log.info(f'URL: {page.url}')
 
+            # Debug
+            log.info(f'Page URL: {page.url}')
+            log.info(f'All frames: {[f.url for f in page.frames]}')
+            inputs = await page.eval_on_selector_all('input', 'els => els.map(e => ({id: e.id, name: e.name}))')
+            log.info(f'Inputs on page: {inputs}')
+
             log.info(f'Filling dates: {start_date} to {end_date}')
             await page.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSStartDate', start_date)
             await page.fill('#ctl00_PlaceHolderMain_generalSearchForm_txtGSEndDate', end_date)
@@ -55,7 +61,6 @@ async def scrape_permits_async(start_date, end_date):
                     if (expand) expand.click();
                 }
             """)
-            # FIX 1: Wait for the actual element instead of hardcoded 10s sleep
             await page.wait_for_selector('select[id*="SecondaryScopeCode1"]', timeout=15000)
 
             log.info('Selecting solar scope code...')
@@ -102,7 +107,6 @@ async def scrape_permits_async(start_date, end_date):
 
                 detail_page = await context.new_page()
                 try:
-                    # FIX 2: Use urljoin to prevent double-path URLs
                     detail_url = urljoin(BASE_URL + '/', lead['detailHref'].lstrip('/'))
                     await detail_page.goto(detail_url, wait_until='networkidle')
 
@@ -150,15 +154,12 @@ async def scrape_permits_async(start_date, end_date):
                     lead['energyStorage'] = 'N/A'
 
                 finally:
-                    # FIX 3: Always close detail page, even if it times out
                     await detail_page.close()
 
             return leads
 
         finally:
             await browser.close()
-
-# FIX 4: Removed dead get_viewstate function
 
 def scrape_permits(start_date, end_date):
     return asyncio.run(scrape_permits_async(start_date, end_date))
