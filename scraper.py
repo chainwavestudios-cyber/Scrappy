@@ -86,18 +86,30 @@ async def scrape_permits_async(start_date, end_date):
             log.info('Dates injected')
 
             # ----------------------------------------------------------------
-            # 5. Select Record Type: "Residential Alteration or Addition - Plan Check-Permit"
+            # DEBUG — log all select elements and their options
+            # ----------------------------------------------------------------
+            await frame.wait_for_timeout(2000)
+            selects = await frame.evaluate("""
+                () => Array.from(document.querySelectorAll('select')).map(s => ({
+                    id: s.id,
+                    name: s.name,
+                    options: Array.from(s.options).slice(0, 5).map(o => o.text)
+                }))
+            """)
+            log.info(f'All selects on page: {selects}')
+
+            # ----------------------------------------------------------------
+            # 5. Select Record Type
             # ----------------------------------------------------------------
             log.info('Selecting record type...')
             record_type_sel = 'select[id*="selGSPermitType"], select[id*="ddlGSRecordType"], select[id*="PermitType"]'
             await frame.wait_for_selector(record_type_sel, timeout=10000)
 
-            # Log options to confirm exact label
             rt_options = await frame.evaluate(f"""
                 () => {{
-                    const sel = document.querySelector('{record_type_sel.split(",")[0]}')
-                          || document.querySelector('{record_type_sel.split(",")[1]}')
-                          || document.querySelector('{record_type_sel.split(",")[2]}');
+                    const sel = document.querySelector('select[id*="selGSPermitType"]')
+                          || document.querySelector('select[id*="ddlGSRecordType"]')
+                          || document.querySelector('select[id*="PermitType"]');
                     return sel ? Array.from(sel.options).map(o => o.text) : [];
                 }}
             """)
@@ -153,15 +165,15 @@ async def scrape_permits_async(start_date, end_date):
                     link = cells[1].find('a')
                     href = link['href'] if link else None
                     lead = {
-                        'recordId':    cells[1].get_text(strip=True),
-                        'openedDate':  cells[2].get_text(strip=True),
-                        'recordType':  cells[3].get_text(strip=True),
-                        'projectName': cells[4].get_text(strip=True),
-                        'address':     cells[5].get_text(strip=True),
+                        'recordId':     cells[1].get_text(strip=True),
+                        'openedDate':   cells[2].get_text(strip=True),
+                        'recordType':   cells[3].get_text(strip=True),
+                        'projectName':  cells[4].get_text(strip=True),
+                        'address':      cells[5].get_text(strip=True),
                         'recordStatus': cells[6].get_text(strip=True),
-                        'action':      cells[7].get_text(strip=True) if len(cells) > 7 else '',
-                        'shortNotes':  short_notes,
-                        'detailHref':  href,
+                        'action':       cells[7].get_text(strip=True) if len(cells) > 7 else '',
+                        'shortNotes':   short_notes,
+                        'detailHref':   href,
                     }
                     all_leads.append(lead)
                     log.info(f'  Matched: {lead["recordId"]} | {lead["address"]}')
@@ -231,7 +243,6 @@ async def scrape_permits_async(start_date, end_date):
                             const links = Array.from(document.querySelectorAll('a, span, div'));
                             const appInfo = links.find(l => l.textContent.trim() === 'Application Information');
                             if (appInfo) {
-                                // Look for expand button near it
                                 const parent = appInfo.closest('tr') || appInfo.parentElement;
                                 const btn = parent ? parent.querySelector('a, img, span.expand') : null;
                                 if (btn) btn.click();
@@ -247,11 +258,9 @@ async def scrape_permits_async(start_date, end_date):
                     def get_field(soup_obj, label):
                         for el in soup_obj.find_all(['span', 'td', 'div', 'label']):
                             if label.lower() in el.get_text().lower():
-                                # Try next sibling
                                 nxt = el.find_next_sibling()
                                 if nxt:
                                     return nxt.get_text(strip=True)
-                                # Try parent's next sibling
                                 parent = el.find_parent()
                                 if parent:
                                     nxt2 = parent.find_next_sibling()
@@ -259,12 +268,12 @@ async def scrape_permits_async(start_date, end_date):
                                         return nxt2.get_text(strip=True)
                         return 'N/A'
 
-                    lead['primaryScopeCode']   = get_field(detail_soup2, 'Primary Scope Code')
-                    lead['kwSystemSize']        = get_field(detail_soup2, 'Rounded Kilowatts Total System Size')
-                    lead['electricalUpgrade']   = get_field(detail_soup2, 'Electrical Service Upgrade')
-                    lead['energyStorage']       = get_field(detail_soup2, 'Advanced Energy Storage System')
-                    lead['crossStreet']         = get_field(detail_soup2, 'Cross Street')
-                    lead['use']                 = get_field(detail_soup2, 'Use')
+                    lead['primaryScopeCode'] = get_field(detail_soup2, 'Primary Scope Code')
+                    lead['kwSystemSize']      = get_field(detail_soup2, 'Rounded Kilowatts Total System Size')
+                    lead['electricalUpgrade'] = get_field(detail_soup2, 'Electrical Service Upgrade')
+                    lead['energyStorage']     = get_field(detail_soup2, 'Advanced Energy Storage System')
+                    lead['crossStreet']       = get_field(detail_soup2, 'Cross Street')
+                    lead['use']               = get_field(detail_soup2, 'Use')
 
                     log.info(f'  kW={lead["kwSystemSize"]} | upgrade={lead["electricalUpgrade"]} | storage={lead["energyStorage"]}')
 
