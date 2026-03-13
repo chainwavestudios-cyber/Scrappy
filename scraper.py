@@ -26,7 +26,7 @@ async def scrape_permits_async(start_date, end_date):
             await page.wait_for_timeout(2000)
 
             # ----------------------------------------------------------------
-            # 2. Click PDS tab
+            # 2. Click PDS tab — search form loads by default
             # ----------------------------------------------------------------
             log.info('Clicking PDS tab...')
             await page.evaluate("""
@@ -37,23 +37,11 @@ async def scrape_permits_async(start_date, end_date):
                 }
             """)
             await page.wait_for_load_state('networkidle')
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(3000)
 
             # ----------------------------------------------------------------
-            # 3. Click "Search Records/Applications" under PDS
+            # 3. Find Welcome.aspx frame and wait for form to fully render
             # ----------------------------------------------------------------
-            log.info('Clicking Search Records/Applications...')
-            await page.evaluate("""
-                () => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const search = links.find(l => l.textContent.trim() === 'Search Records/Applications');
-                    if (search) search.click();
-                }
-            """)
-            await page.wait_for_load_state('networkidle')
-            await page.wait_for_timeout(2000)
-
-            # Find the Welcome.aspx frame where the form lives
             frame = next(
                 (f for f in page.frames if 'Welcome.aspx' in f.url),
                 None
@@ -63,42 +51,30 @@ async def scrape_permits_async(start_date, end_date):
                 frame = page
             log.info(f'Using frame: {frame.url}')
 
-            # ----------------------------------------------------------------
-            # 4. Click "General Search" tab to reveal the full form
-            # ----------------------------------------------------------------
-            log.info('Clicking General Search tab...')
-            await frame.evaluate("""
-                () => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const gs = links.find(l => l.textContent.trim() === 'General Search');
-                    if (gs) {
-                        gs.click();
-                        console.log('clicked General Search');
-                    } else {
-                        console.log('General Search not found. Links: ' + links.map(l => l.textContent.trim()).filter(t => t).join(' | '));
-                    }
-                }
-            """)
-            await frame.wait_for_timeout(2000)
+            # Wait up to 30s for the record type dropdown to appear in the frame
+            log.info('Waiting for search form to render in frame...')
+            try:
+                await frame.wait_for_selector(
+                    '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
+                    timeout=30000
+                )
+                log.info('Search form ready')
+            except Exception:
+                # Log what IS in the frame for debugging
+                html_snapshot = await frame.content()
+                log.info(f'Frame HTML snippet: {html_snapshot[:2000]}')
+                raise
 
-            # Scan for selects after clicking General Search
-            selects_after = await frame.evaluate("""
-                () => Array.from(document.querySelectorAll('select')).map(s => ({
-                    id: s.id, name: s.name
-                }))
+            # Log all record type options to confirm exact label
+            rt_options = await frame.evaluate("""
+                () => Array.from(
+                    document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType').options
+                ).map(o => o.text)
             """)
-            log.info(f'Selects after General Search click: {selects_after}')
-
-            # Also log all links visible now for debugging
-            links_now = await frame.evaluate("""
-                () => Array.from(document.querySelectorAll('a'))
-                    .map(l => l.textContent.trim())
-                    .filter(t => t.length > 0)
-            """)
-            log.info(f'Links visible now: {links_now}')
+            log.info(f'Record type options: {rt_options}')
 
             # ----------------------------------------------------------------
-            # 5. Inject dates via JS (bypasses datepicker widgets)
+            # 4. Inject dates via JS (bypasses datepicker widgets)
             # ----------------------------------------------------------------
             log.info(f'Injecting dates: {start_date} to {end_date}')
             await frame.evaluate(f"""
@@ -109,84 +85,52 @@ async def scrape_permits_async(start_date, end_date):
                         s.value = '{start_date}';
                         s.dispatchEvent(new Event('change'));
                         s.dispatchEvent(new Event('blur'));
-                    }}
+                    }} else {{ console.log('start date field not found'); }}
                     if (e) {{
                         e.value = '{end_date}';
                         e.dispatchEvent(new Event('change'));
                         e.dispatchEvent(new Event('blur'));
-                    }}
+                    }} else {{ console.log('end date field not found'); }}
                 }}
             """)
             log.info('Dates injected')
 
             # ----------------------------------------------------------------
-            # 6. Select Record Type — find which frame has the dropdown
+            # 5. Select Record Type
             # ----------------------------------------------------------------
-            log.info('Finding record type dropdown across all frames...')
-            search_frame = None
-            for f in page.frames:
-                try:
-                    selects = await f.evaluate("""
-                        () => Array.from(document.querySelectorAll('select')).map(s => ({
-                            id: s.id, name: s.name
-                        }))
-                    """)
-                    if selects:
-                        log.info(f'Found selects in frame {f.url}: {selects}')
-                        search_frame = f
-                        break
-                    else:
-                        log.info(f'No selects in frame: {f.url}')
-                except Exception as e:
-                    log.info(f'Frame error {f.url}: {e}')
-
-            if not search_frame:
-                log.warning('No frame with selects found — trying main page')
-                search_frame = page
-
-            # Log all options in the dropdown
-            rt_options = await search_frame.evaluate("""
-                () => {
-                    const sel = document.querySelector('select[id*="ddlGSPermitType"]')
-                             || document.querySelector('select[id*="PermitType"]')
-                             || document.querySelector('select');
-                    return sel ? Array.from(sel.options).map(o => o.text) : ['NO SELECT FOUND'];
-                }
-            """)
-            log.info(f'Record type options: {rt_options}')
-
-            await search_frame.select_option(
-                'select[id*="ddlGSPermitType"], select[id*="PermitType"]',
+            log.info('Selecting record type...')
+            await frame.select_option(
+                '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
                 label='Residential Alteration or Addition - Plan Check-Permit'
             )
             log.info('Record type selected')
-            await search_frame.wait_for_timeout(1000)
+            await frame.wait_for_timeout(1000)
 
             # ----------------------------------------------------------------
-            # 7. Enter Project Name = "OTC"
+            # 6. Enter Project Name = "OTC"
             # ----------------------------------------------------------------
             log.info('Entering project name: OTC')
-            await search_frame.fill('[id*="txtGSProjectName"]', 'OTC')
+            await frame.fill('[id*="txtGSProjectName"]', 'OTC')
 
             # ----------------------------------------------------------------
-            # 8. Click Search
+            # 7. Click Search
             # ----------------------------------------------------------------
             log.info('Clicking search...')
-            await search_frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
-            await search_frame.wait_for_timeout(500)
-            await search_frame.click('a[id*="btnSearch"], input[id*="btnSearch"]')
-            await page.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
+            await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+            await frame.wait_for_timeout(500)
+            await frame.click('a[id*="btnSearch"], input[id*="btnSearch"]')
+            await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
             log.info('Search results loaded')
 
             # ----------------------------------------------------------------
-            # 9. Collect all matching rows across all pages
+            # 8. Collect all matching rows across all pages
             # ----------------------------------------------------------------
             all_leads = []
             page_num = 1
 
             while True:
                 log.info(f'Scraping results page {page_num}...')
-                html = await page.content()
+                html = await frame.content()
                 soup = BeautifulSoup(html, 'lxml')
                 rows = soup.select('tr.gdvPermitList_Row')
                 log.info(f'  Found {len(rows)} rows on page {page_num}')
@@ -223,15 +167,15 @@ async def scrape_permits_async(start_date, end_date):
                     break
 
                 log.info(f'Going to page {page_num + 1}...')
-                await page.click(f'a:text("{page_num + 1}")')
-                await page.wait_for_selector('tr.gdvPermitList_Row', timeout=30000)
-                await page.wait_for_timeout(1000)
+                await frame.click(f'a:text("{page_num + 1}")')
+                await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=30000)
+                await frame.wait_for_timeout(1000)
                 page_num += 1
 
             log.info(f'Total matching leads: {len(all_leads)}')
 
             # ----------------------------------------------------------------
-            # 10. Visit each record detail page
+            # 9. Visit each record detail page
             # ----------------------------------------------------------------
             for i, lead in enumerate(all_leads):
                 if not lead['detailHref']:
