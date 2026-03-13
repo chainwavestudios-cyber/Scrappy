@@ -53,7 +53,7 @@ async def scrape_permits_async(start_date, end_date):
             await page.wait_for_load_state('networkidle')
             await page.wait_for_timeout(2000)
 
-            # Find the Welcome.aspx frame where the actual form lives
+            # Find the Welcome.aspx frame where the date fields live
             frame = next(
                 (f for f in page.frames if 'Welcome.aspx' in f.url),
                 None
@@ -64,7 +64,7 @@ async def scrape_permits_async(start_date, end_date):
             log.info(f'Using frame: {frame.url}')
 
             # ----------------------------------------------------------------
-            # 4. Inject dates via JS (bypasses datepicker widgets)
+            # 4. Inject dates via JS into the frame (bypasses datepicker)
             # ----------------------------------------------------------------
             log.info(f'Injecting dates: {start_date} to {end_date}')
             await frame.evaluate(f"""
@@ -86,56 +86,47 @@ async def scrape_permits_async(start_date, end_date):
             log.info('Dates injected')
 
             # ----------------------------------------------------------------
-            # DEBUG — log all select elements and their options
+            # 5. Select Record Type on MAIN PAGE (not frame)
+            #    Exact ID confirmed from browser inspection
             # ----------------------------------------------------------------
-            await frame.wait_for_timeout(2000)
-            selects = await frame.evaluate("""
-                () => Array.from(document.querySelectorAll('select')).map(s => ({
-                    id: s.id,
-                    name: s.name,
-                    options: Array.from(s.options).slice(0, 5).map(o => o.text)
-                }))
-            """)
-            log.info(f'All selects on page: {selects}')
+            log.info('Waiting for record type dropdown...')
+            await page.wait_for_selector(
+                '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
+                timeout=10000
+            )
 
-            # ----------------------------------------------------------------
-            # 5. Select Record Type
-            # ----------------------------------------------------------------
-            log.info('Selecting record type...')
-            record_type_sel = 'select[id*="selGSPermitType"], select[id*="ddlGSRecordType"], select[id*="PermitType"]'
-            await frame.wait_for_selector(record_type_sel, timeout=10000)
-
-            rt_options = await frame.evaluate(f"""
-                () => {{
-                    const sel = document.querySelector('select[id*="selGSPermitType"]')
-                          || document.querySelector('select[id*="ddlGSRecordType"]')
-                          || document.querySelector('select[id*="PermitType"]');
-                    return sel ? Array.from(sel.options).map(o => o.text) : [];
-                }}
+            # Log all options to confirm exact label text
+            rt_options = await page.evaluate("""
+                () => Array.from(
+                    document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType').options
+                ).map(o => o.text)
             """)
             log.info(f'Record type options: {rt_options}')
 
-            await frame.select_option(
-                record_type_sel,
+            await page.select_option(
+                '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
                 label='Residential Alteration or Addition - Plan Check-Permit'
             )
             log.info('Record type selected')
-            await frame.wait_for_timeout(1000)
+            await page.wait_for_timeout(1000)
 
             # ----------------------------------------------------------------
-            # 6. Enter Project Name = "OTC"
+            # 6. Enter Project Name = "OTC" on MAIN PAGE
             # ----------------------------------------------------------------
             log.info('Entering project name: OTC')
-            await frame.fill('[id*="txtGSProjectName"], [id*="ProjectName"]', 'OTC')
+            await page.fill(
+                '[id*="txtGSProjectName"]',
+                'OTC'
+            )
 
             # ----------------------------------------------------------------
-            # 7. Click Search
+            # 7. Click Search on MAIN PAGE
             # ----------------------------------------------------------------
             log.info('Clicking search...')
-            await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
-            await frame.wait_for_timeout(500)
-            await frame.click('a[id*="btnSearch"], input[id*="btnSearch"]')
-            await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
+            await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+            await page.wait_for_timeout(500)
+            await page.click('a[id*="btnSearch"], input[id*="btnSearch"]')
+            await page.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
             log.info('Search results loaded')
 
             # ----------------------------------------------------------------
@@ -146,7 +137,7 @@ async def scrape_permits_async(start_date, end_date):
 
             while True:
                 log.info(f'Scraping results page {page_num}...')
-                html = await frame.content()
+                html = await page.content()
                 soup = BeautifulSoup(html, 'lxml')
                 rows = soup.select('tr.gdvPermitList_Row')
                 log.info(f'  Found {len(rows)} rows on page {page_num}')
@@ -179,15 +170,15 @@ async def scrape_permits_async(start_date, end_date):
                     log.info(f'  Matched: {lead["recordId"]} | {lead["address"]}')
 
                 # Check for next page link
-                next_page = soup.find('a', string=str(page_num + 1))
-                if not next_page:
+                next_link = soup.find('a', string=str(page_num + 1))
+                if not next_link:
                     log.info('No more pages')
                     break
 
                 log.info(f'Going to page {page_num + 1}...')
-                await frame.click(f'a:text("{page_num + 1}")')
-                await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=30000)
-                await frame.wait_for_timeout(1000)
+                await page.click(f'a:text("{page_num + 1}")')
+                await page.wait_for_selector('tr.gdvPermitList_Row', timeout=30000)
+                await page.wait_for_timeout(1000)
                 page_num += 1
 
             log.info(f'Total matching leads: {len(all_leads)}')
@@ -209,7 +200,7 @@ async def scrape_permits_async(start_date, end_date):
                     detail_html = await detail_page.content()
                     detail_soup = BeautifulSoup(detail_html, 'lxml')
 
-                    # -- Record ID and Status from detail page header --
+                    # -- Record ID and Status --
                     record_id_el = detail_soup.find(string=lambda t: t and 'Record ID' in t)
                     lead['detailRecordId'] = record_id_el.strip() if record_id_el else lead['recordId']
 
@@ -217,6 +208,8 @@ async def scrape_permits_async(start_date, end_date):
                     if status_el:
                         parent = status_el.find_parent()
                         lead['detailRecordStatus'] = parent.get_text(strip=True).replace('Record Status:', '').strip()
+                    else:
+                        lead['detailRecordStatus'] = 'N/A'
 
                     # -- Licensed Professional --
                     lp_section = detail_soup.find(string=lambda t: t and 'Licensed Professional' in t)
@@ -240,8 +233,8 @@ async def scrape_permits_async(start_date, end_date):
                     # -- Click "+" next to Application Information --
                     await detail_page.evaluate("""
                         () => {
-                            const links = Array.from(document.querySelectorAll('a, span, div'));
-                            const appInfo = links.find(l => l.textContent.trim() === 'Application Information');
+                            const els = Array.from(document.querySelectorAll('a, span, div'));
+                            const appInfo = els.find(l => l.textContent.trim() === 'Application Information');
                             if (appInfo) {
                                 const parent = appInfo.closest('tr') || appInfo.parentElement;
                                 const btn = parent ? parent.querySelector('a, img, span.expand') : null;
