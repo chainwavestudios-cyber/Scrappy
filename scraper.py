@@ -86,8 +86,25 @@ async def scrape_permits_async(start_date, end_date):
             log.info('Dates injected')
 
             # ----------------------------------------------------------------
-            # 5. Select Record Type on MAIN PAGE (not frame)
-            #    Exact ID confirmed from browser inspection
+            # DEBUG — scan every frame for select elements
+            # ----------------------------------------------------------------
+            await page.wait_for_timeout(1000)
+            for f in page.frames:
+                try:
+                    selects = await f.evaluate("""
+                        () => Array.from(document.querySelectorAll('select')).map(s => ({
+                            id: s.id, name: s.name
+                        }))
+                    """)
+                    if selects:
+                        log.info(f'Frame {f.url} has selects: {selects}')
+                    else:
+                        log.info(f'Frame {f.url} — no selects')
+                except Exception as e:
+                    log.info(f'Frame {f.url} — error: {e}')
+
+            # ----------------------------------------------------------------
+            # 5. Select Record Type — exact ID from browser inspection
             # ----------------------------------------------------------------
             log.info('Waiting for record type dropdown...')
             await page.wait_for_selector(
@@ -95,7 +112,6 @@ async def scrape_permits_async(start_date, end_date):
                 timeout=10000
             )
 
-            # Log all options to confirm exact label text
             rt_options = await page.evaluate("""
                 () => Array.from(
                     document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType').options
@@ -111,16 +127,13 @@ async def scrape_permits_async(start_date, end_date):
             await page.wait_for_timeout(1000)
 
             # ----------------------------------------------------------------
-            # 6. Enter Project Name = "OTC" on MAIN PAGE
+            # 6. Enter Project Name = "OTC"
             # ----------------------------------------------------------------
             log.info('Entering project name: OTC')
-            await page.fill(
-                '[id*="txtGSProjectName"]',
-                'OTC'
-            )
+            await page.fill('[id*="txtGSProjectName"]', 'OTC')
 
             # ----------------------------------------------------------------
-            # 7. Click Search on MAIN PAGE
+            # 7. Click Search
             # ----------------------------------------------------------------
             log.info('Clicking search...')
             await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
@@ -149,7 +162,6 @@ async def scrape_permits_async(start_date, end_date):
 
                     short_notes = cells[8].get_text(strip=True) if len(cells) > 8 else ''
 
-                    # Only keep rows matching the target solar note
                     if TARGET_NOTE not in short_notes:
                         continue
 
@@ -169,7 +181,6 @@ async def scrape_permits_async(start_date, end_date):
                     all_leads.append(lead)
                     log.info(f'  Matched: {lead["recordId"]} | {lead["address"]}')
 
-                # Check for next page link
                 next_link = soup.find('a', string=str(page_num + 1))
                 if not next_link:
                     log.info('No more pages')
