@@ -1,12 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 import requests
 import os
+import glob
 import threading
 from bs4 import BeautifulSoup
 from scraper import scrape_permits, BASE_URL
 
 app = Flask(__name__)
-
 BASE44_WEBHOOK = os.environ.get('BASE44_WEBHOOK_URL', '')
 
 def run_scrape_and_post(start_date, end_date):
@@ -25,6 +25,10 @@ def run_scrape_and_post(start_date, end_date):
         print(f'Scrape failed: {e}')
         return []
 
+@app.route('/')
+def index():
+    return jsonify({'status': 'ok', 'service': 'scrappy'})
+
 @app.route('/scrape', methods=['POST'])
 def scrape():
     data = request.json or {}
@@ -42,24 +46,31 @@ def scrape_sync():
     leads = scrape_permits(start_date, end_date)
     return jsonify({'success': True, 'count': len(leads), 'leads': leads})
 
+@app.route('/video')
+def get_video():
+    files = glob.glob('/app/videos/*.webm')
+    if not files:
+        return jsonify({'error': 'No video found yet — run a scrape first'}), 404
+    latest = max(files, key=os.path.getctime)
+    return send_file(latest, mimetype='video/webm')
+
+@app.route('/videos')
+def list_videos():
+    files = glob.glob('/app/videos/*.webm')
+    return jsonify({'videos': [os.path.basename(f) for f in files], 'count': len(files)})
+
 @app.route('/debug', methods=['POST'])
 def debug():
     session = requests.Session()
     session.headers.update({'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
-
     r1 = session.get(f'{BASE_URL}/Default.aspx')
     soup1 = BeautifulSoup(r1.text, 'lxml')
-    viewstate = get_viewstate(soup1)
-
     r2 = session.post(f'{BASE_URL}/Default.aspx', data={
-        **viewstate,
         '__EVENTTARGET': 'ctl00$HeaderNavigation$hypModule_PDS',
     })
     soup2 = BeautifulSoup(r2.text, 'lxml')
-
     r3 = session.get(f'{BASE_URL}/Cap/CapHome.aspx?module=PDS&TabName=PDS')
     soup3 = BeautifulSoup(r3.text, 'lxml')
-
     return jsonify({
         'homepage_status': r1.status_code,
         'pds_tab_status': r2.status_code,
