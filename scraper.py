@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin
@@ -9,25 +10,29 @@ log = logging.getLogger(__name__)
 
 BASE_URL = 'https://publicservices.sandiegocounty.gov/CitizenAccess'
 TARGET_NOTE = '8002 - REN - Solar Photovoltaic Roof Mount Residential - Online'
+VIDEO_DIR = '/app/videos'
 
 
 async def scrape_permits_async(start_date, end_date):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+
+        # Record video of the entire session
+        os.makedirs(VIDEO_DIR, exist_ok=True)
+        context = await browser.new_context(
+            record_video_dir=VIDEO_DIR,
+            record_video_size={'width': 1280, 'height': 800},
+            viewport={'width': 1280, 'height': 800},
+        )
         page = await context.new_page()
 
         try:
-            # ----------------------------------------------------------------
             # 1. Load homepage
-            # ----------------------------------------------------------------
             log.info('Loading homepage...')
             await page.goto(f'{BASE_URL}/Default.aspx', wait_until='networkidle')
-            await page.wait_for_timeout(2000)
+            await page.wait_for_timeout(3000)
 
-            # ----------------------------------------------------------------
-            # 2. Click PDS tab — search form loads by default
-            # ----------------------------------------------------------------
+            # 2. Click PDS tab
             log.info('Clicking PDS tab...')
             await page.evaluate("""
                 () => {
@@ -37,11 +42,9 @@ async def scrape_permits_async(start_date, end_date):
                 }
             """)
             await page.wait_for_load_state('networkidle')
-            await page.wait_for_timeout(3000)
+            await page.wait_for_timeout(5000)
 
-            # ----------------------------------------------------------------
-            # 3. Find Welcome.aspx frame and wait for form to fully render
-            # ----------------------------------------------------------------
+            # Get the Welcome.aspx frame
             frame = next(
                 (f for f in page.frames if 'Welcome.aspx' in f.url),
                 None
@@ -51,21 +54,15 @@ async def scrape_permits_async(start_date, end_date):
                 frame = page
             log.info(f'Using frame: {frame.url}')
 
-            # Wait up to 30s for the record type dropdown to appear in the frame
-            log.info('Waiting for search form to render in frame...')
-            try:
-                await frame.wait_for_selector(
-                    '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
-                    timeout=30000
-                )
-                log.info('Search form ready')
-            except Exception:
-                # Log what IS in the frame for debugging
-                html_snapshot = await frame.content()
-                log.info(f'Frame HTML snippet: {html_snapshot[:2000]}')
-                raise
+            # 3. Wait for the record type dropdown
+            log.info('Waiting for record type dropdown...')
+            await frame.wait_for_selector(
+                '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
+                timeout=30000,
+                state='visible'
+            )
+            log.info('Dropdown found!')
 
-            # Log all record type options to confirm exact label
             rt_options = await frame.evaluate("""
                 () => Array.from(
                     document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType').options
@@ -73,31 +70,19 @@ async def scrape_permits_async(start_date, end_date):
             """)
             log.info(f'Record type options: {rt_options}')
 
-            # ----------------------------------------------------------------
-            # 4. Inject dates via JS (bypasses datepicker widgets)
-            # ----------------------------------------------------------------
+            # 4. Inject dates
             log.info(f'Injecting dates: {start_date} to {end_date}')
             await frame.evaluate(f"""
                 () => {{
                     const s = document.querySelector('[id*="txtGSStartDate"]');
                     const e = document.querySelector('[id*="txtGSEndDate"]');
-                    if (s) {{
-                        s.value = '{start_date}';
-                        s.dispatchEvent(new Event('change'));
-                        s.dispatchEvent(new Event('blur'));
-                    }} else {{ console.log('start date field not found'); }}
-                    if (e) {{
-                        e.value = '{end_date}';
-                        e.dispatchEvent(new Event('change'));
-                        e.dispatchEvent(new Event('blur'));
-                    }} else {{ console.log('end date field not found'); }}
+                    if (s) {{ s.value = '{start_date}'; s.dispatchEvent(new Event('change')); s.dispatchEvent(new Event('blur')); }}
+                    if (e) {{ e.value = '{end_date}'; e.dispatchEvent(new Event('change')); e.dispatchEvent(new Event('blur')); }}
                 }}
             """)
             log.info('Dates injected')
 
-            # ----------------------------------------------------------------
-            # 5. Select Record Type
-            # ----------------------------------------------------------------
+            # 5. Select record type
             log.info('Selecting record type...')
             await frame.select_option(
                 '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
@@ -106,15 +91,11 @@ async def scrape_permits_async(start_date, end_date):
             log.info('Record type selected')
             await frame.wait_for_timeout(1000)
 
-            # ----------------------------------------------------------------
-            # 6. Enter Project Name = "OTC"
-            # ----------------------------------------------------------------
+            # 6. Enter project name
             log.info('Entering project name: OTC')
             await frame.fill('[id*="txtGSProjectName"]', 'OTC')
 
-            # ----------------------------------------------------------------
-            # 7. Click Search
-            # ----------------------------------------------------------------
+            # 7. Click search
             log.info('Clicking search...')
             await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
             await frame.wait_for_timeout(500)
@@ -122,29 +103,24 @@ async def scrape_permits_async(start_date, end_date):
             await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
             log.info('Search results loaded')
 
-            # ----------------------------------------------------------------
-            # 8. Collect all matching rows across all pages
-            # ----------------------------------------------------------------
+            # 8. Collect matching rows across all pages
             all_leads = []
             page_num = 1
 
             while True:
-                log.info(f'Scraping results page {page_num}...')
+                log.info(f'Scraping page {page_num}...')
                 html = await frame.content()
                 soup = BeautifulSoup(html, 'lxml')
                 rows = soup.select('tr.gdvPermitList_Row')
-                log.info(f'  Found {len(rows)} rows on page {page_num}')
+                log.info(f'  {len(rows)} rows on page {page_num}')
 
                 for row in rows:
                     cells = row.find_all('td')
                     if len(cells) < 7:
                         continue
-
                     short_notes = cells[8].get_text(strip=True) if len(cells) > 8 else ''
-
                     if TARGET_NOTE not in short_notes:
                         continue
-
                     link = cells[1].find('a')
                     href = link['href'] if link else None
                     lead = {
@@ -165,7 +141,6 @@ async def scrape_permits_async(start_date, end_date):
                 if not next_link:
                     log.info('No more pages')
                     break
-
                 log.info(f'Going to page {page_num + 1}...')
                 await frame.click(f'a:text("{page_num + 1}")')
                 await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=30000)
@@ -174,14 +149,11 @@ async def scrape_permits_async(start_date, end_date):
 
             log.info(f'Total matching leads: {len(all_leads)}')
 
-            # ----------------------------------------------------------------
-            # 9. Visit each record detail page
-            # ----------------------------------------------------------------
+            # 9. Get details for each lead
             for i, lead in enumerate(all_leads):
                 if not lead['detailHref']:
                     continue
-                log.info(f'Getting details for {lead["recordId"]} ({i+1}/{len(all_leads)})...')
-
+                log.info(f'Getting details {lead["recordId"]} ({i+1}/{len(all_leads)})...')
                 detail_page = await context.new_page()
                 try:
                     detail_url = urljoin(BASE_URL + '/', lead['detailHref'].lstrip('/'))
@@ -191,7 +163,6 @@ async def scrape_permits_async(start_date, end_date):
                     detail_html = await detail_page.content()
                     detail_soup = BeautifulSoup(detail_html, 'lxml')
 
-                    # -- Record ID and Status --
                     record_id_el = detail_soup.find(string=lambda t: t and 'Record ID' in t)
                     lead['detailRecordId'] = record_id_el.strip() if record_id_el else lead['recordId']
 
@@ -202,7 +173,6 @@ async def scrape_permits_async(start_date, end_date):
                     else:
                         lead['detailRecordStatus'] = 'N/A'
 
-                    # -- Licensed Professional --
                     lp_section = detail_soup.find(string=lambda t: t and 'Licensed Professional' in t)
                     if lp_section:
                         parent = lp_section.find_parent()
@@ -211,7 +181,6 @@ async def scrape_permits_async(start_date, end_date):
                     else:
                         lead['licensedProfessional'] = 'N/A'
 
-                    # -- Click "More Details" arrow --
                     await detail_page.evaluate("""
                         () => {
                             const links = Array.from(document.querySelectorAll('a'));
@@ -221,7 +190,6 @@ async def scrape_permits_async(start_date, end_date):
                     """)
                     await detail_page.wait_for_timeout(1500)
 
-                    # -- Click "+" next to Application Information --
                     await detail_page.evaluate("""
                         () => {
                             const els = Array.from(document.querySelectorAll('a, span, div'));
@@ -273,7 +241,13 @@ async def scrape_permits_async(start_date, end_date):
             return all_leads
 
         finally:
+            # Close context first so video gets saved
+            await context.close()
             await browser.close()
+
+            # Log where the video was saved
+            videos = os.listdir(VIDEO_DIR) if os.path.exists(VIDEO_DIR) else []
+            log.info(f'Videos saved to {VIDEO_DIR}: {videos}')
 
 
 def scrape_permits(start_date, end_date):
