@@ -159,22 +159,10 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             log.info(f'[{city_name}] Waiting for search form...')
             await page.wait_for_selector('[id*="txtGSStartDate"]', timeout=20000, state='visible')
 
-            # 5. Inject dates
-            log.info(f'[{city_name}] Injecting dates: {start_date} to {end_date}')
-            await page.evaluate(f"""
-                () => {{
-                    const s = document.querySelector('[id*="txtGSStartDate"]');
-                    const e = document.querySelector('[id*="txtGSEndDate"]');
-                    if (s) {{ s.value = '{start_date}'; s.dispatchEvent(new Event('change')); s.dispatchEvent(new Event('blur')); }}
-                    if (e) {{ e.value = '{end_date}'; e.dispatchEvent(new Event('change')); e.dispatchEvent(new Event('blur')); }}
-                }}
-            """)
-
-            # 6. Select permit type if configured
+            # 5. Select permit type FIRST — postback wipes dates if done after
             if config.get('permit_type'):
                 log.info(f'[{city_name}] Selecting permit type: {config["permit_type"]}')
                 try:
-                    # Find the first visible select on the page
                     type_sel = await page.evaluate("""
                         () => {
                             const candidates = [
@@ -187,14 +175,12 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                                 const el = document.querySelector(sel);
                                 if (el) return '#' + el.id;
                             }
-                            // fallback: first visible select
                             const selects = Array.from(document.querySelectorAll('select'));
                             const visible = selects.find(s => s.offsetParent !== null);
                             return visible ? '#' + visible.id : null;
                         }
                     """)
                     log.info(f'[{city_name}] Using type selector: {type_sel}')
-
                     if type_sel:
                         await page.wait_for_selector(type_sel, timeout=8000)
                         options = await page.evaluate(f"""
@@ -203,7 +189,6 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                             ).map(o => o.text)
                         """)
                         log.info(f'[{city_name}] Permit type options: {options}')
-                        # Use JS to set value to avoid timing issues with postback
                         await page.evaluate(f"""
                             () => {{
                                 const sel = document.querySelector('{type_sel}');
@@ -216,12 +201,31 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                                 }}
                             }}
                         """)
-                        # Wait for postback to complete
                         await page.wait_for_load_state('networkidle')
                         await page.wait_for_timeout(2000)
                         log.info(f'[{city_name}] Permit type selected')
                 except Exception as e:
                     log.warning(f'[{city_name}] Could not select permit type: {e}')
+
+            # 6. Inject dates AFTER permit type (postback wipes dates if injected before)
+            log.info(f'[{city_name}] Injecting dates: {start_date} to {end_date}')
+            await page.evaluate(f"""
+                () => {{
+                    const s = document.querySelector('[id*="txtGSStartDate"]');
+                    const e = document.querySelector('[id*="txtGSEndDate"]');
+                    if (s) {{ s.value = '{start_date}'; s.dispatchEvent(new Event('change')); s.dispatchEvent(new Event('blur')); }}
+                    if (e) {{ e.value = '{end_date}'; e.dispatchEvent(new Event('change')); e.dispatchEvent(new Event('blur')); }}
+                }}
+            """)
+            await page.wait_for_timeout(500)
+            dates_check = await page.evaluate("""
+                () => ({
+                    start: document.querySelector('[id*="txtGSStartDate"]')?.value || 'NOT FOUND',
+                    end: document.querySelector('[id*="txtGSEndDate"]')?.value || 'NOT FOUND'
+                })
+            """)
+            log.info(f'[{city_name}] Dates verified: {dates_check}')
+
 
             # 7. Enter project name if configured
             if config.get('use_project_name'):
