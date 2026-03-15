@@ -8,27 +8,26 @@ from bs4 import BeautifulSoup
 app = Flask(__name__)
 BASE44_WEBHOOK = os.environ.get('BASE44_WEBHOOK_URL', '')
 
+# Disable gzip compression — responses are small, no need
+@app.after_request
+def disable_compression(response):
+    response.headers['Content-Encoding'] = 'identity'
+    return response
+
 # ---------------------------------------------------------------------------
 # Lazy scraper loader — only imports a scraper when that city is called
 # ---------------------------------------------------------------------------
 
 def get_scraper(city: str):
-    """
-    Returns (scrape_fn, kwargs) for the requested city.
-    Scrapers are only imported when called — no startup overhead.
-    """
     city = city.lower().replace(' ', '_').replace('-', '_')
 
-    # San Diego — custom PDS portal
     if city in ('san_diego', 'sandiego'):
         from scraper import scrape_permits
         return scrape_permits, {}
 
-    # Los Angeles — custom portal (TODO: build scraper_la.py)
     if city in ('los_angeles', 'la', 'losangeles'):
         raise NotImplementedError('Los Angeles scraper not yet built')
 
-    # All standard Accela cities
     from scraper_accela import scrape_accela, CITY_CONFIGS
     if city in CITY_CONFIGS:
         return scrape_accela, {'city_key': city}
@@ -41,17 +40,11 @@ def get_scraper(city: str):
 def run_and_post(city, start_date, end_date):
     try:
         scrape_fn, kwargs = get_scraper(city)
-        if kwargs:
-            leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs)
-        else:
-            leads = scrape_fn(start_date, end_date)
-
+        leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs) if kwargs else scrape_fn(start_date, end_date)
         if BASE44_WEBHOOK:
             res = requests.post(BASE44_WEBHOOK, json={
-                'leads':     leads,
-                'startDate': start_date,
-                'endDate':   end_date,
-                'source':    city,
+                'leads': leads, 'startDate': start_date,
+                'endDate': end_date, 'source': city,
             })
             print(f'Posted {len(leads)} leads to Base44: {res.status_code}')
         return leads
@@ -68,18 +61,18 @@ def run_and_post(city, start_date, end_date):
 def index():
     from scraper_accela import CITY_CONFIGS
     return jsonify({
-        'status':          'ok',
-        'service':         'scrappy',
+        'status': 'ok',
+        'service': 'scrappy',
         'available_cities': ['san_diego', 'los_angeles'] + list(CITY_CONFIGS.keys()),
     })
 
 
 @app.route('/scrape', methods=['POST'])
 def scrape():
-    data       = request.json or {}
-    city       = data.get('city', 'san_diego')
+    data = request.json or {}
+    city = data.get('city', 'san_diego')
     start_date = data.get('startDate', '03/01/2026')
-    end_date   = data.get('endDate',   '03/10/2026')
+    end_date = data.get('endDate', '03/15/2026')
     thread = threading.Thread(target=run_and_post, args=(city, start_date, end_date))
     thread.start()
     return jsonify({'status': 'started', 'city': city,
@@ -88,16 +81,13 @@ def scrape():
 
 @app.route('/scrape/sync', methods=['POST'])
 def scrape_sync():
-    data       = request.json or {}
-    city       = data.get('city', 'san_diego')
+    data = request.json or {}
+    city = data.get('city', 'san_diego')
     start_date = data.get('startDate', '03/01/2026')
-    end_date   = data.get('endDate',   '03/10/2026')
+    end_date = data.get('endDate', '03/15/2026')
     try:
         scrape_fn, kwargs = get_scraper(city)
-        if kwargs:
-            leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs)
-        else:
-            leads = scrape_fn(start_date, end_date)
+        leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs) if kwargs else scrape_fn(start_date, end_date)
         return jsonify({'success': True, 'city': city,
                         'count': len(leads), 'leads': leads})
     except NotImplementedError as e:
