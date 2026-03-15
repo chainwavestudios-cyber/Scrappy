@@ -173,20 +173,53 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             # 6. Select permit type if configured
             if config.get('permit_type'):
                 log.info(f'[{city_name}] Selecting permit type: {config["permit_type"]}')
-                type_sel = 'select[id*="ddlGSPermitType"], select[id*="selGSPermitType"], select[id*="ddlSearchType"]'
                 try:
-                    await page.wait_for_selector(type_sel, timeout=8000)
-                    options = await page.evaluate(f"""
-                        () => {{
-                            const sel = document.querySelector('{type_sel.split(",")[0]}')
-                                  || document.querySelector('{type_sel.split(",")[1]}')
-                                  || document.querySelector('{type_sel.split(",")[2]}');
-                            return sel ? Array.from(sel.options).map(o => o.text) : [];
-                        }}
+                    # Find the first visible select on the page
+                    type_sel = await page.evaluate("""
+                        () => {
+                            const candidates = [
+                                'select[id*="ddlGSPermitType"]',
+                                'select[id*="selGSPermitType"]',
+                                'select[id*="ddlSearchType"]',
+                                'select[id*="PermitType"]',
+                            ];
+                            for (const sel of candidates) {
+                                const el = document.querySelector(sel);
+                                if (el) return '#' + el.id;
+                            }
+                            // fallback: first visible select
+                            const selects = Array.from(document.querySelectorAll('select'));
+                            const visible = selects.find(s => s.offsetParent !== null);
+                            return visible ? '#' + visible.id : null;
+                        }
                     """)
-                    log.info(f'[{city_name}] Permit type options: {options}')
-                    await page.select_option(type_sel, label=config['permit_type'])
-                    await page.wait_for_timeout(1000)
+                    log.info(f'[{city_name}] Using type selector: {type_sel}')
+
+                    if type_sel:
+                        await page.wait_for_selector(type_sel, timeout=8000)
+                        options = await page.evaluate(f"""
+                            () => Array.from(
+                                document.querySelector('{type_sel}').options
+                            ).map(o => o.text)
+                        """)
+                        log.info(f'[{city_name}] Permit type options: {options}')
+                        # Use JS to set value to avoid timing issues with postback
+                        await page.evaluate(f"""
+                            () => {{
+                                const sel = document.querySelector('{type_sel}');
+                                const opt = Array.from(sel.options).find(
+                                    o => o.text.trim() === '{config["permit_type"]}'
+                                );
+                                if (opt) {{
+                                    sel.value = opt.value;
+                                    sel.dispatchEvent(new Event('change'));
+                                }}
+                            }}
+                        """)
+                        # Wait for postback to complete
+                        await page.wait_for_load_state('networkidle')
+                        await page.wait_for_timeout(2000)
+                        log.info(f'[{city_name}] Permit type selected')
                 except Exception as e:
                     log.warning(f'[{city_name}] Could not select permit type: {e}')
 
@@ -202,7 +235,23 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             log.info(f'[{city_name}] Clicking Search...')
             await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
             await page.wait_for_timeout(500)
-            await page.click('a[id*="btnSearch"], input[id*="btnSearch"]')
+            clicked = False
+            for btn_sel in [
+                'a[id*="btnSearch"]', 'input[id*="btnSearch"]',
+                'button[id*="btnSearch"]', 'a[id*="btnGS"]',
+                'input[value="Search"]', 'a:text("Search")',
+            ]:
+                try:
+                    loc = page.locator(btn_sel)
+                    if await loc.count() > 0:
+                        await loc.first.click()
+                        clicked = True
+                        log.info(f'[{city_name}] Clicked: {btn_sel}')
+                        break
+                except Exception:
+                    continue
+            if not clicked:
+                raise Exception('Could not find search button')
             await page.wait_for_selector(
                 'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row',
                 timeout=60000
