@@ -17,7 +17,6 @@ async def scrape_permits_async(start_date, end_date):
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
 
-        # Record video of the entire session
         os.makedirs(VIDEO_DIR, exist_ok=True)
         context = await browser.new_context(
             record_video_dir=VIDEO_DIR,
@@ -32,19 +31,17 @@ async def scrape_permits_async(start_date, end_date):
             await page.goto(f'{BASE_URL}/Default.aspx', wait_until='networkidle')
             await page.wait_for_timeout(3000)
 
-            # 2. Click PDS tab
+            # 2. Click PDS tab using native Playwright click
             log.info('Clicking PDS tab...')
-            await page.evaluate("""
-                () => {
-                    const links = Array.from(document.querySelectorAll('a'));
-                    const pds = links.find(l => l.textContent.trim() === 'PDS');
-                    if (pds) pds.click();
-                }
-            """)
+            await page.get_by_text('PDS', exact=True).first.click()
             await page.wait_for_load_state('networkidle')
             await page.wait_for_timeout(5000)
+            log.info(f'After PDS click, URL: {page.url}')
 
-            # Get the Welcome.aspx frame
+            # 3. Get the Welcome.aspx frame
+            for f in page.frames:
+                log.info(f'Frame: {f.url}')
+
             frame = next(
                 (f for f in page.frames if 'Welcome.aspx' in f.url),
                 None
@@ -54,7 +51,7 @@ async def scrape_permits_async(start_date, end_date):
                 frame = page
             log.info(f'Using frame: {frame.url}')
 
-            # 3. Wait for the record type dropdown
+            # 4. Wait for record type dropdown
             log.info('Waiting for record type dropdown...')
             await frame.wait_for_selector(
                 '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
@@ -70,7 +67,7 @@ async def scrape_permits_async(start_date, end_date):
             """)
             log.info(f'Record type options: {rt_options}')
 
-            # 4. Inject dates
+            # 5. Inject dates
             log.info(f'Injecting dates: {start_date} to {end_date}')
             await frame.evaluate(f"""
                 () => {{
@@ -82,7 +79,7 @@ async def scrape_permits_async(start_date, end_date):
             """)
             log.info('Dates injected')
 
-            # 5. Select record type
+            # 6. Select record type
             log.info('Selecting record type...')
             await frame.select_option(
                 '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
@@ -91,11 +88,11 @@ async def scrape_permits_async(start_date, end_date):
             log.info('Record type selected')
             await frame.wait_for_timeout(1000)
 
-            # 6. Enter project name
+            # 7. Enter project name
             log.info('Entering project name: OTC')
             await frame.fill('[id*="txtGSProjectName"]', 'OTC')
 
-            # 7. Click search
+            # 8. Click search
             log.info('Clicking search...')
             await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
             await frame.wait_for_timeout(500)
@@ -103,7 +100,7 @@ async def scrape_permits_async(start_date, end_date):
             await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
             log.info('Search results loaded')
 
-            # 8. Collect matching rows across all pages
+            # 9. Collect matching rows across all pages
             all_leads = []
             page_num = 1
 
@@ -149,7 +146,7 @@ async def scrape_permits_async(start_date, end_date):
 
             log.info(f'Total matching leads: {len(all_leads)}')
 
-            # 9. Get details for each lead
+            # 10. Get details for each lead
             for i, lead in enumerate(all_leads):
                 if not lead['detailHref']:
                     continue
@@ -241,11 +238,8 @@ async def scrape_permits_async(start_date, end_date):
             return all_leads
 
         finally:
-            # Close context first so video gets saved
             await context.close()
             await browser.close()
-
-            # Log where the video was saved
             videos = os.listdir(VIDEO_DIR) if os.path.exists(VIDEO_DIR) else []
             log.info(f'Videos saved to {VIDEO_DIR}: {videos}')
 
