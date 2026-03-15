@@ -235,11 +235,29 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             log.info(f'[{city_name}] Clicking Search...')
             await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
             await page.wait_for_timeout(500)
+
+            # Debug — log all buttons/links with IDs
+            btns = await page.evaluate("""
+                () => Array.from(document.querySelectorAll('a, input[type=submit], button'))
+                    .filter(el => el.id || el.value || el.textContent.trim())
+                    .map(el => ({
+                        tag: el.tagName,
+                        id: el.id,
+                        value: el.value || '',
+                        text: el.textContent.trim().substring(0, 30)
+                    }))
+            """)
+            log.info(f'[{city_name}] Buttons/links on page: {btns}')
+
             clicked = False
             for btn_sel in [
-                'a[id*="btnSearch"]', 'input[id*="btnSearch"]',
-                'button[id*="btnSearch"]', 'a[id*="btnGS"]',
-                'input[value="Search"]', 'a:text("Search")',
+                '#ctl00_PlaceHolderMain_btnNewSearch',
+                'a[id*="btnNewSearch"]',
+                'a[id*="btnSearch"]',
+                'input[id*="btnSearch"]',
+                'button[id*="btnSearch"]',
+                'a[id*="btnGS"]',
+                'input[value="Search"]',
             ]:
                 try:
                     loc = page.locator(btn_sel)
