@@ -1,75 +1,167 @@
+"""
+Generic Accela scraper — works for any standard Accela portal.
+Each city passes its own config dict.
+"""
 import asyncio
 import logging
 import os
+import csv
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger(__name__)
 
-BASE_URL = 'https://publicservices.sandiegocounty.gov/CitizenAccess'
-TARGET_NOTE = '8002 - REN - Solar Photovoltaic Roof Mount Residential - Online'
 VIDEO_DIR = '/app/videos'
 
 
-async def scrape_permits_async(start_date, end_date):
+# ---------------------------------------------------------------------------
+# City configs — add new Accela cities here
+# ---------------------------------------------------------------------------
+
+CITY_CONFIGS = {
+    'sacramento': {
+        'name':        'Sacramento',
+        'base_url':    'https://aca-prod.accela.com/SACRAMENTO',
+        'module':      'Building',
+        'permit_type': 'Solar Photovoltaic',   # update after recon
+        'use_project_name': 'OTC',             # Sacramento uses project name filter
+        'source':      'sacramento_accela',
+    },
+    'oakland': {
+        'name':        'Oakland',
+        'base_url':    'https://aca-prod.accela.com/OAKLAND',
+        'module':      'Building',
+        'permit_type': None,                   # no filter, date range only
+        'use_project_name': None,
+        'source':      'oakland_accela',
+    },
+    'anaheim': {
+        'name':        'Anaheim',
+        'base_url':    'https://aca-prod.accela.com/ANAHEIM',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'anaheim_accela',
+    },
+    'santa_ana': {
+        'name':        'Santa Ana',
+        'base_url':    'https://aca-prod.accela.com/SANTAANA',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'santa_ana_accela',
+    },
+    'chula_vista': {
+        'name':        'Chula Vista',
+        'base_url':    'https://aca-prod.accela.com/CHULAVISTA',
+        'module':      'Building',
+        'permit_type': 'Residential Solar Energy',
+        'use_project_name': None,
+        'source':      'chula_vista_accela',
+    },
+    'fontana': {
+        'name':        'Fontana',
+        'base_url':    'https://aca-prod.accela.com/FONTANA',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'fontana_accela',
+    },
+    'palmdale': {
+        'name':        'Palmdale',
+        'base_url':    'https://aca-prod.accela.com/PALMDALE',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'palmdale_accela',
+    },
+    'concord': {
+        'name':        'Concord',
+        'base_url':    'https://aca-prod.accela.com/CONCORD',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'concord_accela',
+    },
+    'berkeley': {
+        'name':        'Berkeley',
+        'base_url':    'https://aca-prod.accela.com/BERKELEY',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'berkeley_accela',
+    },
+    'downey': {
+        'name':        'Downey',
+        'base_url':    'https://aca-prod.accela.com/DOWNEY',
+        'module':      'Building',
+        'permit_type': None,
+        'use_project_name': None,
+        'source':      'downey_accela',
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Generic Accela scraper
+# ---------------------------------------------------------------------------
+
+async def scrape_accela_async(config: dict, start_date: str, end_date: str):
+    base_url  = config['base_url']
+    module    = config['module']
+    city_name = config['name']
+    source    = config['source']
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-
         os.makedirs(VIDEO_DIR, exist_ok=True)
         context = await browser.new_context(
             record_video_dir=VIDEO_DIR,
             record_video_size={'width': 1280, 'height': 800},
             viewport={'width': 1280, 'height': 800},
+            accept_downloads=True,
         )
         page = await context.new_page()
 
         try:
-            # 1. Load homepage
-            log.info('Loading homepage...')
-            await page.goto(f'{BASE_URL}/Default.aspx', wait_until='networkidle')
+            # 1. Load portal
+            log.info(f'[{city_name}] Loading portal...')
+            await page.goto(
+                f'{base_url}/Cap/CapHome.aspx?module={module}',
+                wait_until='networkidle'
+            )
             await page.wait_for_timeout(3000)
 
-            # 2. Click PDS tab using native Playwright click
-            log.info('Clicking PDS tab...')
-            await page.get_by_text('PDS', exact=True).first.click()
-            await page.wait_for_load_state('networkidle')
-            await page.wait_for_timeout(5000)
-            log.info(f'After PDS click, URL: {page.url}')
+            # 2. Click Search Applications / Search Records / Building Records
+            log.info(f'[{city_name}] Finding search entry...')
+            for label in ['Search Applications', 'Search Records', 'Building Records', 'Search Permits']:
+                try:
+                    loc = page.get_by_role('link', name=label)
+                    if await loc.count() > 0:
+                        await loc.first.click()
+                        await page.wait_for_load_state('networkidle')
+                        await page.wait_for_timeout(2000)
+                        log.info(f'[{city_name}] Clicked: {label}')
+                        break
+                except Exception:
+                    continue
 
-            # 3. Get the Welcome.aspx frame
-            for f in page.frames:
-                log.info(f'Frame: {f.url}')
+            # 3. Click Building tab
+            try:
+                await page.get_by_role('link', name='Building').first.click()
+                await page.wait_for_timeout(2000)
+                log.info(f'[{city_name}] Clicked Building tab')
+            except Exception:
+                log.warning(f'[{city_name}] No Building tab found')
 
-            frame = next(
-                (f for f in page.frames if 'Welcome.aspx' in f.url),
-                None
-            )
-            if not frame:
-                log.warning('Welcome.aspx frame not found, using main page')
-                frame = page
-            log.info(f'Using frame: {frame.url}')
-
-            # 4. Wait for record type dropdown
-            log.info('Waiting for record type dropdown...')
-            await frame.wait_for_selector(
-                '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
-                timeout=30000,
-                state='visible'
-            )
-            log.info('Dropdown found!')
-
-            rt_options = await frame.evaluate("""
-                () => Array.from(
-                    document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType').options
-                ).map(o => o.text)
-            """)
-            log.info(f'Record type options: {rt_options}')
+            # 4. Wait for search form
+            log.info(f'[{city_name}] Waiting for search form...')
+            await page.wait_for_selector('[id*="txtGSStartDate"]', timeout=20000, state='visible')
 
             # 5. Inject dates
-            log.info(f'Injecting dates: {start_date} to {end_date}')
-            await frame.evaluate(f"""
+            log.info(f'[{city_name}] Injecting dates: {start_date} to {end_date}')
+            await page.evaluate(f"""
                 () => {{
                     const s = document.querySelector('[id*="txtGSStartDate"]');
                     const e = document.querySelector('[id*="txtGSEndDate"]');
@@ -77,172 +169,276 @@ async def scrape_permits_async(start_date, end_date):
                     if (e) {{ e.value = '{end_date}'; e.dispatchEvent(new Event('change')); e.dispatchEvent(new Event('blur')); }}
                 }}
             """)
-            log.info('Dates injected')
 
-            # 6. Select record type
-            log.info('Selecting record type...')
-            await frame.select_option(
-                '#ctl00_PlaceHolderMain_generalSearchForm_ddlGSPermitType',
-                label='Residential Alteration or Addition - Plan Check-Permit'
+            # 6. Select permit type if configured
+            if config.get('permit_type'):
+                log.info(f'[{city_name}] Selecting permit type: {config["permit_type"]}')
+                type_sel = 'select[id*="ddlGSPermitType"], select[id*="selGSPermitType"], select[id*="ddlSearchType"]'
+                try:
+                    await page.wait_for_selector(type_sel, timeout=8000)
+                    options = await page.evaluate(f"""
+                        () => {{
+                            const sel = document.querySelector('{type_sel.split(",")[0]}')
+                                  || document.querySelector('{type_sel.split(",")[1]}')
+                                  || document.querySelector('{type_sel.split(",")[2]}');
+                            return sel ? Array.from(sel.options).map(o => o.text) : [];
+                        }}
+                    """)
+                    log.info(f'[{city_name}] Permit type options: {options}')
+                    await page.select_option(type_sel, label=config['permit_type'])
+                    await page.wait_for_timeout(1000)
+                except Exception as e:
+                    log.warning(f'[{city_name}] Could not select permit type: {e}')
+
+            # 7. Enter project name if configured
+            if config.get('use_project_name'):
+                log.info(f'[{city_name}] Entering project name: {config["use_project_name"]}')
+                try:
+                    await page.fill('[id*="txtGSProjectName"]', config['use_project_name'])
+                except Exception:
+                    pass
+
+            # 8. Click Search
+            log.info(f'[{city_name}] Clicking Search...')
+            await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+            await page.wait_for_timeout(500)
+            await page.click('a[id*="btnSearch"], input[id*="btnSearch"]')
+            await page.wait_for_selector(
+                'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row',
+                timeout=60000
             )
-            log.info('Record type selected')
-            await frame.wait_for_timeout(1000)
+            log.info(f'[{city_name}] Results loaded')
 
-            # 7. Enter project name
-            log.info('Entering project name: OTC')
-            await frame.fill('[id*="txtGSProjectName"]', 'OTC')
+            # 9. Try CSV download first, fall back to scraping rows
+            leads = []
+            try:
+                log.info(f'[{city_name}] Attempting CSV download...')
+                async with page.expect_download(timeout=15000) as dl_info:
+                    await page.click(
+                        'a[id*="lnkExport"], a[title*="Export"], '
+                        'a[title*="Download"], a:text("Export"), a:text("Download")'
+                    )
+                download = await dl_info.value
+                csv_path = f'/app/{source}_permits.csv'
+                await download.save_as(csv_path)
+                log.info(f'[{city_name}] CSV downloaded: {csv_path}')
 
-            # 8. Click search
-            log.info('Clicking search...')
-            await frame.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
-            await frame.wait_for_timeout(500)
-            await frame.click('a[id*="btnSearch"], input[id*="btnSearch"]')
-            await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=60000)
-            log.info('Search results loaded')
+                with open(csv_path, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        leads.append(_parse_csv_row(row, source))
+                log.info(f'[{city_name}] Parsed {len(leads)} permits from CSV')
 
-            # 9. Collect matching rows across all pages
-            all_leads = []
-            page_num = 1
+            except Exception as e:
+                log.warning(f'[{city_name}] Download failed, scraping rows instead: {e}')
+                leads = await _scrape_rows(page, source)
 
-            while True:
-                log.info(f'Scraping page {page_num}...')
-                html = await frame.content()
-                soup = BeautifulSoup(html, 'lxml')
-                rows = soup.select('tr.gdvPermitList_Row')
-                log.info(f'  {len(rows)} rows on page {page_num}')
-
-                for row in rows:
-                    cells = row.find_all('td')
-                    if len(cells) < 7:
-                        continue
-                    short_notes = cells[8].get_text(strip=True) if len(cells) > 8 else ''
-                    if TARGET_NOTE not in short_notes:
-                        continue
-                    link = cells[1].find('a')
-                    href = link['href'] if link else None
-                    lead = {
-                        'recordId':     cells[1].get_text(strip=True),
-                        'openedDate':   cells[2].get_text(strip=True),
-                        'recordType':   cells[3].get_text(strip=True),
-                        'projectName':  cells[4].get_text(strip=True),
-                        'address':      cells[5].get_text(strip=True),
-                        'recordStatus': cells[6].get_text(strip=True),
-                        'action':       cells[7].get_text(strip=True) if len(cells) > 7 else '',
-                        'shortNotes':   short_notes,
-                        'detailHref':   href,
-                    }
-                    all_leads.append(lead)
-                    log.info(f'  Matched: {lead["recordId"]} | {lead["address"]}')
-
-                next_link = soup.find('a', string=str(page_num + 1))
-                if not next_link:
-                    log.info('No more pages')
-                    break
-                log.info(f'Going to page {page_num + 1}...')
-                await frame.click(f'a:text("{page_num + 1}")')
-                await frame.wait_for_selector('tr.gdvPermitList_Row', timeout=30000)
-                await frame.wait_for_timeout(1000)
-                page_num += 1
-
-            log.info(f'Total matching leads: {len(all_leads)}')
-
-            # 10. Get details for each lead
-            for i, lead in enumerate(all_leads):
-                if not lead['detailHref']:
+            # 10. Get details for each permit
+            for i, lead in enumerate(leads):
+                permit_num = lead.get('permitNumber') or lead.get('recordId')
+                if not permit_num:
                     continue
-                log.info(f'Getting details {lead["recordId"]} ({i+1}/{len(all_leads)})...')
+                log.info(f'[{city_name}] Details {permit_num} ({i+1}/{len(leads)})...')
                 detail_page = await context.new_page()
                 try:
-                    detail_url = urljoin(BASE_URL + '/', lead['detailHref'].lstrip('/'))
-                    await detail_page.goto(detail_url, wait_until='networkidle')
-                    await detail_page.wait_for_timeout(1500)
-
-                    detail_html = await detail_page.content()
-                    detail_soup = BeautifulSoup(detail_html, 'lxml')
-
-                    record_id_el = detail_soup.find(string=lambda t: t and 'Record ID' in t)
-                    lead['detailRecordId'] = record_id_el.strip() if record_id_el else lead['recordId']
-
-                    status_el = detail_soup.find(string=lambda t: t and 'Record Status' in t)
-                    if status_el:
-                        parent = status_el.find_parent()
-                        lead['detailRecordStatus'] = parent.get_text(strip=True).replace('Record Status:', '').strip()
-                    else:
-                        lead['detailRecordStatus'] = 'N/A'
-
-                    lp_section = detail_soup.find(string=lambda t: t and 'Licensed Professional' in t)
-                    if lp_section:
-                        parent = lp_section.find_parent()
-                        block = parent.find_next_sibling()
-                        lead['licensedProfessional'] = block.get_text(separator='\n', strip=True) if block else 'N/A'
-                    else:
-                        lead['licensedProfessional'] = 'N/A'
-
-                    await detail_page.evaluate("""
-                        () => {
-                            const links = Array.from(document.querySelectorAll('a'));
-                            const more = links.find(l => l.textContent.includes('More Details'));
-                            if (more) more.click();
-                        }
-                    """)
-                    await detail_page.wait_for_timeout(1500)
-
-                    await detail_page.evaluate("""
-                        () => {
-                            const els = Array.from(document.querySelectorAll('a, span, div'));
-                            const appInfo = els.find(l => l.textContent.trim() === 'Application Information');
-                            if (appInfo) {
-                                const parent = appInfo.closest('tr') || appInfo.parentElement;
-                                const btn = parent ? parent.querySelector('a, img, span.expand') : null;
-                                if (btn) btn.click();
-                                else appInfo.click();
-                            }
-                        }
-                    """)
-                    await detail_page.wait_for_timeout(2000)
-
-                    detail_html2 = await detail_page.content()
-                    detail_soup2 = BeautifulSoup(detail_html2, 'lxml')
-
-                    def get_field(soup_obj, label):
-                        for el in soup_obj.find_all(['span', 'td', 'div', 'label']):
-                            if label.lower() in el.get_text().lower():
-                                nxt = el.find_next_sibling()
-                                if nxt:
-                                    return nxt.get_text(strip=True)
-                                parent = el.find_parent()
-                                if parent:
-                                    nxt2 = parent.find_next_sibling()
-                                    if nxt2:
-                                        return nxt2.get_text(strip=True)
-                        return 'N/A'
-
-                    lead['primaryScopeCode'] = get_field(detail_soup2, 'Primary Scope Code')
-                    lead['kwSystemSize']      = get_field(detail_soup2, 'Rounded Kilowatts Total System Size')
-                    lead['electricalUpgrade'] = get_field(detail_soup2, 'Electrical Service Upgrade')
-                    lead['energyStorage']     = get_field(detail_soup2, 'Advanced Energy Storage System')
-                    lead['crossStreet']       = get_field(detail_soup2, 'Cross Street')
-                    lead['use']               = get_field(detail_soup2, 'Use')
-
-                    log.info(f'  kW={lead["kwSystemSize"]} | upgrade={lead["electricalUpgrade"]} | storage={lead["energyStorage"]}')
-
+                    await _get_permit_details(detail_page, base_url, module, permit_num, lead)
                 except Exception as e:
-                    log.error(f'Detail failed {lead["recordId"]}: {e}')
-                    for field in ['detailRecordId', 'detailRecordStatus', 'licensedProfessional',
-                                  'primaryScopeCode', 'kwSystemSize', 'electricalUpgrade',
-                                  'energyStorage', 'crossStreet', 'use']:
-                        lead.setdefault(field, 'N/A')
+                    log.error(f'[{city_name}] Detail failed {permit_num}: {e}')
+                    _set_defaults(lead)
                 finally:
                     await detail_page.close()
 
-            return all_leads
+            return leads
 
         finally:
             await context.close()
             await browser.close()
             videos = os.listdir(VIDEO_DIR) if os.path.exists(VIDEO_DIR) else []
-            log.info(f'Videos saved to {VIDEO_DIR}: {videos}')
+            log.info(f'[{city_name}] Videos saved: {videos}')
 
 
-def scrape_permits(start_date, end_date):
-    return asyncio.run(scrape_permits_async(start_date, end_date))
+def _parse_csv_row(row, source):
+    """Normalize CSV row — handles different column name variants."""
+    return {
+        'source':            source,
+        'date':              row.get('Date', '').strip(),
+        'permitNumber':      (row.get('Permit #') or row.get('Record ID') or '').strip(),
+        'permitType':        (row.get('Permit Type') or row.get('Record Type') or '').strip(),
+        'permitDescription': (row.get('Permit Description') or row.get('Project Name') or '').strip(),
+        'projectName':       row.get('Project Name', '').strip(),
+        'status':            (row.get('Status') or row.get('Record Status') or '').strip(),
+        'shortNotes':        row.get('Short Notes', '').strip(),
+    }
+
+
+async def _scrape_rows(page, source):
+    """Fallback: scrape results table row by row across all pages."""
+    leads = []
+    page_num = 1
+    while True:
+        html = await page.content()
+        soup = BeautifulSoup(html, 'lxml')
+        rows = soup.select('tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row')
+        log.info(f'  Scraping page {page_num}: {len(rows)} rows')
+
+        for row in rows:
+            cells = row.find_all('td')
+            if len(cells) < 3:
+                continue
+            link = row.find('a')
+            href = link['href'] if link else None
+            leads.append({
+                'source':       source,
+                'date':         cells[0].get_text(strip=True) if len(cells) > 0 else '',
+                'permitNumber': cells[1].get_text(strip=True) if len(cells) > 1 else '',
+                'permitType':   cells[2].get_text(strip=True) if len(cells) > 2 else '',
+                'status':       cells[4].get_text(strip=True) if len(cells) > 4 else '',
+                'shortNotes':   cells[6].get_text(strip=True) if len(cells) > 6 else '',
+                'detailHref':   href,
+            })
+
+        next_link = soup.find('a', string=str(page_num + 1))
+        if not next_link:
+            break
+        await page.click(f'a:text("{page_num + 1}")')
+        await page.wait_for_selector(
+            'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row',
+            timeout=30000
+        )
+        page_num += 1
+
+    return leads
+
+
+async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
+    """Navigate to permit detail and extract all fields."""
+    await detail_page.goto(
+        f'{base_url}/Cap/CapHome.aspx?module={module}',
+        wait_until='networkidle'
+    )
+    await detail_page.wait_for_timeout(2000)
+
+    # Click Building tab
+    try:
+        await detail_page.get_by_role('link', name='Building').first.click()
+        await detail_page.wait_for_timeout(2000)
+    except Exception:
+        pass
+
+    # Search by permit number
+    await detail_page.wait_for_selector(
+        '[id*="txtGSPermitNumber"], [id*="txtPermitNo"], [id*="txtGSCapNumber"]',
+        timeout=10000
+    )
+    await detail_page.fill(
+        '[id*="txtGSPermitNumber"], [id*="txtPermitNo"], [id*="txtGSCapNumber"]',
+        permit_num
+    )
+    await detail_page.click('a[id*="btnSearch"], input[id*="btnSearch"]')
+    await detail_page.wait_for_selector(
+        'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even',
+        timeout=30000
+    )
+
+    # Click the permit link
+    await detail_page.click('tr.ACA_TabRow_Odd a, tr.ACA_TabRow_Even a')
+    await detail_page.wait_for_load_state('networkidle')
+    await detail_page.wait_for_timeout(2000)
+
+    # More Details
+    await detail_page.evaluate("""
+        () => {
+            const links = Array.from(document.querySelectorAll('a'));
+            const more = links.find(l => l.textContent.includes('More Details'));
+            if (more) more.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(1500)
+
+    # Additional Information
+    await detail_page.evaluate("""
+        () => {
+            const els = Array.from(document.querySelectorAll('a, span'));
+            const ai = els.find(l => l.textContent.trim() === 'Additional Information');
+            if (ai) ai.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(1500)
+
+    # Application Details / Application Information
+    await detail_page.evaluate("""
+        () => {
+            const els = Array.from(document.querySelectorAll('a, span'));
+            const ad = els.find(l =>
+                l.textContent.trim() === 'Application Details' ||
+                l.textContent.trim() === 'Application Information'
+            );
+            if (ad) ad.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(2000)
+
+    html = await detail_page.content()
+    soup = BeautifulSoup(html, 'lxml')
+
+    def get_field(label):
+        for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
+            if el.get_text(strip=True).lower().rstrip(':') == label.lower().rstrip(':'):
+                nxt = el.find_next_sibling()
+                if nxt and nxt.get_text(strip=True):
+                    return nxt.get_text(strip=True)
+                parent = el.find_parent()
+                if parent:
+                    nxt2 = parent.find_next_sibling()
+                    if nxt2 and nxt2.get_text(strip=True):
+                        return nxt2.get_text(separator=' ', strip=True)
+        return 'N/A'
+
+    def get_block(label):
+        for el in soup.find_all(['span', 'td', 'div', 'th']):
+            if label.lower() in el.get_text().lower():
+                parent = el.find_parent(['tr', 'div', 'section', 'table'])
+                if parent:
+                    nxt = parent.find_next_sibling()
+                    if nxt:
+                        return nxt.get_text(separator=' ', strip=True)
+        return 'N/A'
+
+    lead['workLocation']        = get_block('Work Location')
+    lead['applicantName']       = get_block('Applicant')
+    lead['applicantPhone']      = get_field('Phone')
+    lead['licensedProfessional']= get_block('Licensed Professional')
+    lead['projectDescription']  = get_field('Project Description')
+    lead['jobValue']            = get_field('Job Value($)')
+    lead['occupancyType']       = get_field('What is the occupancy type?')
+    lead['subType']             = get_field('Sub Type')
+    lead['numberOfPanels']      = get_field('Number of Panels')
+    lead['zone']                = get_field('Zone')
+    lead['climateZone']         = get_field('Climate Zone')
+    lead['floodPlain']          = get_field('Flood Plain')
+    lead['inspectorArea']       = get_field('Inspector Area')
+    # Also try San Diego style fields
+    lead['primaryScopeCode']    = get_field('Primary Scope Code')
+    lead['kwSystemSize']        = get_field('Rounded Kilowatts Total System Size')
+    lead['electricalUpgrade']   = get_field('Electrical Service Upgrade')
+    lead['energyStorage']       = get_field('Advanced Energy Storage System')
+    lead['crossStreet']         = get_field('Cross Street')
+
+    log.info(f'  panels={lead["numberOfPanels"]} | subType={lead["subType"]} | kW={lead["kwSystemSize"]}')
+
+
+def _set_defaults(lead):
+    for field in ['workLocation', 'applicantName', 'applicantPhone', 'licensedProfessional',
+                  'projectDescription', 'jobValue', 'occupancyType', 'subType',
+                  'numberOfPanels', 'zone', 'climateZone', 'floodPlain', 'inspectorArea',
+                  'primaryScopeCode', 'kwSystemSize', 'electricalUpgrade',
+                  'energyStorage', 'crossStreet']:
+        lead.setdefault(field, 'N/A')
+
+
+def scrape_accela(city_key: str, start_date: str, end_date: str):
+    """Public entry point — call with city key from CITY_CONFIGS."""
+    config = CITY_CONFIGS.get(city_key)
+    if not config:
+        raise ValueError(f'Unknown city: {city_key}. Available: {list(CITY_CONFIGS.keys())}')
+    return asyncio.run(scrape_accela_async(config, start_date, end_date))
