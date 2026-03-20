@@ -116,6 +116,122 @@ CITY_CONFIGS = get_city_configs()
 
 
 # ---------------------------------------------------------------------------
+# PDS / iframe portals (e.g. San Diego Default.aspx)
+# ---------------------------------------------------------------------------
+
+async def _try_click_pds_entry(surface, labels: list, city_name: str) -> bool:
+    """
+    Click county portal entry (e.g. San Diego 'PDS' tile).
+
+    Often a <div> with visible text, role=generic, no accessible name — not a link.
+    Order: exact text → div with exact text → link role (other sites).
+    """
+    for raw in labels:
+        rw = (raw or '').strip()
+        if not rw:
+            continue
+        # 1) Exact visible text (matches div/button with "PDS")
+        try:
+            tloc = surface.get_by_text(rw, exact=True)
+            if await tloc.count() > 0:
+                await tloc.first.click(timeout=20000)
+                log.info(f'[{city_name}] Clicked portal entry (get_by_text exact={rw!r})')
+                return True
+        except Exception as e:
+            log.debug(f'[{city_name}] PDS get_by_text {rw!r}: {e}')
+        # 2) Small tile divs (e.g. navy box ~27×25px)
+        try:
+            pat = re.compile(r'^' + re.escape(rw) + r'$', re.I)
+            dloc = surface.locator('div', has_text=pat)
+            if await dloc.count() > 0:
+                await dloc.first.click(timeout=20000)
+                log.info(f'[{city_name}] Clicked portal entry (div + text {rw!r})')
+                return True
+        except Exception as e:
+            log.debug(f'[{city_name}] PDS div {rw!r}: {e}')
+        # 3) Real <a> on other counties
+        try:
+            loc = surface.get_by_role('link', name=re.compile(rw, re.I))
+            if await loc.count() > 0:
+                await loc.first.click(timeout=20000)
+                log.info(f'[{city_name}] Clicked portal entry (link {rw!r})')
+                return True
+        except Exception as e:
+            log.debug(f'[{city_name}] PDS link {rw!r}: {e}')
+    return False
+
+
+async def _surface_has_visible_search_form(surface) -> bool:
+    try:
+        loc = surface.locator('[id*="txtGSStartDate"]')
+        if await loc.count() == 0:
+            return False
+        return await loc.first.is_visible()
+    except Exception:
+        return False
+
+
+async def _resolve_accela_search_surface(page, config: dict, city_name: str):
+    """
+    County PDS sites often wrap Citizen Access in an iframe and require a
+    'PDS' (or similar) link first. Returns Page or Frame where the Accela
+    general search form lives.
+    """
+    if not config.get('portal_pds_iframe'):
+        return page
+
+    labels = list(config.get('pds_entry_link_names', ['PDS']))
+
+    async def _wait_portal_idle():
+        try:
+            await page.wait_for_load_state('networkidle', timeout=90000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(2500)
+
+    # 1) Entry control on main page (often a div "PDS", not a link)
+    if await _try_click_pds_entry(page, labels, city_name):
+        await _wait_portal_idle()
+
+    if await _surface_has_visible_search_form(page):
+        log.info(f'[{city_name}] Accela search form on main document')
+        return page
+
+    # 2) Form already inside a child iframe
+    for fr in page.frames:
+        if fr == page.main_frame:
+            continue
+        if await _surface_has_visible_search_form(fr):
+            log.info(f'[{city_name}] Accela search form in iframe (no main PDS click): {fr.url[:90]}...')
+            return fr
+
+    # 3) PDS tile only inside iframe → click then re-scan
+    for fr in page.frames:
+        if fr == page.main_frame:
+            continue
+        if await _try_click_pds_entry(fr, labels, city_name):
+            await _wait_portal_idle()
+            break
+
+    if await _surface_has_visible_search_form(page):
+        log.info(f'[{city_name}] Accela search form on main (after in-iframe PDS)')
+        return page
+
+    for fr in page.frames:
+        if fr == page.main_frame:
+            continue
+        if await _surface_has_visible_search_form(fr):
+            log.info(f'[{city_name}] Accela search form in iframe after PDS: {fr.url[:90]}...')
+            return fr
+
+    log.warning(
+        f'[{city_name}] portal_pds_iframe set but Accela form not found; '
+        f'continuing on main page (may fail).'
+    )
+    return page
+
+
+# ---------------------------------------------------------------------------
 # Generic Accela scraper
 # ---------------------------------------------------------------------------
 
@@ -146,30 +262,42 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             await page.goto(search_url, wait_until='networkidle')
             await page.wait_for_timeout(3000)
 
+            search = await _resolve_accela_search_surface(page, config, city_name)
+
             log.info(f'[{city_name}] Waiting for search form...')
             try:
-                await page.wait_for_selector('[id*="txtGSStartDate"]', timeout=15000, state='visible')
+                await search.wait_for_selector('[id*="txtGSStartDate"]', timeout=20000, state='visible')
                 log.info(f'[{city_name}] Search form loaded')
             except Exception:
                 log.warning(f'[{city_name}] Direct URL failed, trying menu navigation...')
-                for label in ['Search Applications', 'Search Records', 'Building Records', 'Search Permits']:
-                    try:
-                        loc = page.get_by_role('link', name=label)
-                        if await loc.count() > 0:
-                            await loc.first.click()
-                            await page.wait_for_load_state('networkidle')
-                            await page.wait_for_timeout(2000)
-                            log.info(f'[{city_name}] Clicked: {label}')
-                            break
-                    except Exception:
-                        continue
-                await page.wait_for_selector('[id*="txtGSStartDate"]', timeout=15000, state='visible')
+                # Menu links may be on main page while form is in iframe — try both
+                _seen = set()
+                _targets = []
+                for t in (page, search):
+                    tid = id(t)
+                    if tid not in _seen:
+                        _seen.add(tid)
+                        _targets.append(t)
+                for target in _targets:
+                    for label in ['Search Applications', 'Search Records', 'Building Records', 'Search Permits']:
+                        try:
+                            loc = target.get_by_role('link', name=label)
+                            if await loc.count() > 0:
+                                await loc.first.click()
+                                await page.wait_for_load_state('networkidle')
+                                await page.wait_for_timeout(2000)
+                                log.info(f'[{city_name}] Clicked: {label}')
+                                break
+                        except Exception:
+                            continue
+                search = await _resolve_accela_search_surface(page, config, city_name)
+                await search.wait_for_selector('[id*="txtGSStartDate"]', timeout=20000, state='visible')
 
             # Select permit type FIRST
             if config.get('permit_type'):
                 log.info(f'[{city_name}] Selecting permit type: {config["permit_type"]}')
                 try:
-                    type_sel = await page.evaluate("""
+                    type_sel = await search.evaluate("""
                         () => {
                             const candidates = [
                                 'select[id*="ddlGSPermitType"]',
@@ -187,14 +315,14 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                         }
                     """)
                     if type_sel:
-                        await page.wait_for_selector(type_sel, timeout=15000)
-                        options = await page.evaluate(f"""
+                        await search.wait_for_selector(type_sel, timeout=15000)
+                        options = await search.evaluate(f"""
                             () => Array.from(
                                 document.querySelector('{type_sel}').options
                             ).map(o => o.text)
                         """)
                         log.info(f'[{city_name}] Permit type options: {options}')
-                        await page.evaluate(f"""
+                        await search.evaluate(f"""
                             () => {{
                                 const sel = document.querySelector('{type_sel}');
                                 const opt = Array.from(sel.options).find(
@@ -214,7 +342,7 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
 
             # Inject dates AFTER permit type postback
             log.info(f'[{city_name}] Injecting dates: {start_date} to {end_date}')
-            await page.evaluate(f"""
+            await search.evaluate(f"""
                 () => {{
                     const sVis = document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_txtGSStartDate');
                     const eVis = document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_txtGSEndDate');
@@ -230,9 +358,9 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     if (eVis) {{ eVis.dispatchEvent(new Event('change')); eVis.dispatchEvent(new Event('blur')); }}
                 }}
             """)
-            await page.wait_for_timeout(500)
+            await search.wait_for_timeout(500)
 
-            dates_check = await page.evaluate("""
+            dates_check = await search.evaluate("""
                 () => ({
                     visStart: document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_txtGSStartDate')?.value,
                     visEnd:   document.querySelector('#ctl00_PlaceHolderMain_generalSearchForm_txtGSEndDate')?.value,
@@ -244,14 +372,14 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
 
             if config.get('use_project_name'):
                 try:
-                    await page.fill('[id*="txtGSProjectName"]', config['use_project_name'])
+                    await search.fill('[id*="txtGSProjectName"]', config['use_project_name'])
                 except Exception:
                     pass
 
             # Click Search
             log.info(f'[{city_name}] Clicking Search...')
-            await page.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
-            await page.wait_for_timeout(500)
+            await search.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+            await search.wait_for_timeout(500)
 
             clicked = False
             for btn_sel in [
@@ -264,7 +392,7 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                 'input[value="Search"]',
             ]:
                 try:
-                    loc = page.locator(btn_sel)
+                    loc = search.locator(btn_sel)
                     if await loc.count() > 0:
                         await loc.first.click()
                         clicked = True
@@ -275,14 +403,14 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             if not clicked:
                 raise Exception('Could not find search button')
 
-            await page.wait_for_selector(
+            await search.wait_for_selector(
                 'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row',
                 timeout=60000
             )
             log.info(f'[{city_name}] Results loaded')
 
             log.info(f'[{city_name}] Scraping filtered results...')
-            leads = await _scrape_rows(page, source, base_url, module, config)
+            leads = await _scrape_rows(search, source, base_url, module, config)
             log.info(f'[{city_name}] Found {len(leads)} permits in date range')
 
             for i, lead in enumerate(leads):
@@ -472,16 +600,24 @@ async def _scrape_rows(page, source, base_url, module, config=None):
     return unique_leads
 
 
-async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
-    detail_url = f"{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}"
-    lead['permitUrl'] = detail_url
-    log.info(f'  → {detail_url}')
+def _get_field_from_soup(soup, label):
+    """Label/value pairs on Accela detail HTML (table or sibling layout)."""
+    lbl = label.lower().rstrip(':')
+    for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
+        if el.get_text(strip=True).lower().rstrip(':') == lbl:
+            nxt = el.find_next_sibling()
+            if nxt and nxt.get_text(strip=True):
+                return nxt.get_text(strip=True)
+            parent = el.find_parent()
+            if parent:
+                nxt2 = parent.find_next_sibling()
+                if nxt2 and nxt2.get_text(strip=True):
+                    return nxt2.get_text(separator=' ', strip=True)
+    return ''
 
-    # domcontentloaded is faster and more reliable than networkidle — avoids timeouts
-    await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=20000)
-    await detail_page.wait_for_timeout(2000)
 
-    # Expand More Details
+async def _expand_accela_detail_sections(detail_page):
+    """Expand More Details → Additional Information → Application Information."""
     await detail_page.evaluate("""
         () => {
             const links = Array.from(document.querySelectorAll('a'));
@@ -490,8 +626,6 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
         }
     """)
     await detail_page.wait_for_timeout(1500)
-
-    # Expand Additional Information
     await detail_page.evaluate("""
         () => {
             const els = Array.from(document.querySelectorAll('a, span'));
@@ -500,8 +634,6 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
         }
     """)
     await detail_page.wait_for_timeout(1500)
-
-    # Expand Application Information (contains Valuation)
     await detail_page.evaluate("""
         () => {
             const els = Array.from(document.querySelectorAll('a, span'));
@@ -511,21 +643,39 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
     """)
     await detail_page.wait_for_timeout(1500)
 
+
+async def _click_record_details_tab(detail_page):
+    """Return from Contacts (etc.) to the main record / cap detail view."""
+    await detail_page.evaluate("""
+        () => {
+            const links = Array.from(document.querySelectorAll('a, span'));
+            const labels = ['Record Details', 'Record Information', 'Record Info'];
+            for (const text of labels) {
+                const el = links.find(l => l.textContent.trim() === text);
+                if (el) { el.click(); return true; }
+            }
+            return false;
+        }
+    """)
+    await detail_page.wait_for_timeout(2000)
+
+
+async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
+    detail_url = f"{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}"
+    lead['permitUrl'] = detail_url
+    log.info(f'  → {detail_url}')
+
+    # domcontentloaded is faster and more reliable than networkidle — avoids timeouts
+    await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=20000)
+    await detail_page.wait_for_timeout(2000)
+
+    await _expand_accela_detail_sections(detail_page)
+
     html = await detail_page.content()
     soup = BeautifulSoup(html, 'lxml')
 
     def get_field(label):
-        for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
-            if el.get_text(strip=True).lower().rstrip(':') == label.lower().rstrip(':'):
-                nxt = el.find_next_sibling()
-                if nxt and nxt.get_text(strip=True):
-                    return nxt.get_text(strip=True)
-                parent = el.find_parent()
-                if parent:
-                    nxt2 = parent.find_next_sibling()
-                    if nxt2 and nxt2.get_text(strip=True):
-                        return nxt2.get_text(separator=' ', strip=True)
-        return ''
+        return _get_field_from_soup(soup, label)
 
     # ---------------------------------------------------------------------------
     # Job Value — Valuation field under Application Information
@@ -670,7 +820,8 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
                         if sib.find(['h2', 'h3', 'strong']) and len(parts) > 1:
                             break
                     if parts:
-                        owner_block = ' | '.join(parts[:5])
+                        flat = [p.strip() for p in parts if p.strip()]
+                        owner_block = ' | '.join(list(dict.fromkeys(flat))[:5])
                         break
         if owner_block:
             lead['ownerOnApplication'] = owner_block
@@ -679,6 +830,35 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
             if len(name_words) >= 2:
                 lead['homeownerFirstName'] = name_words[0]
                 lead['homeownerLastName']  = ' '.join(name_words[1:])
+
+        # Contacts tab swaps the DOM — old soup is stale. Return to record view,
+        # re-open Application Information, then read kW / Electrical / ESS (etc.).
+        await _click_record_details_tab(detail_page)
+        await _expand_accela_detail_sections(detail_page)
+        html_app = await detail_page.content()
+        soup_app = BeautifulSoup(html_app, 'lxml')
+
+        kwh = _get_field_from_soup(soup_app, 'Rounded Kilowatts Total System Size')
+        if kwh:
+            lead['systemSize'] = kwh + ' kW'
+        elec = _get_field_from_soup(soup_app, 'Electrical Service Upgrade')
+        if elec:
+            lead['electricalServiceUpgrade'] = elec
+        ess = _get_field_from_soup(soup_app, 'Advanced Energy Storage System')
+        if ess:
+            lead['advancedEnergyStorage'] = ess
+        cs = _get_field_from_soup(soup_app, 'Cross Street')
+        if cs:
+            lead['crossStreet'] = cs
+        dow = _get_field_from_soup(soup_app, 'Description of Work')
+        if dow:
+            lead['descriptionOfWork'] = dow
+        nob = _get_field_from_soup(soup_app, 'Number of Buildings')
+        if nob:
+            lead['numberOfBuildings'] = nob
+        hu = _get_field_from_soup(soup_app, 'Housing Units')
+        if hu:
+            lead['housingUnits'] = hu
     else:
         if project_desc_clean:
             first, last = extract_homeowner_name(project_desc_clean, '')
@@ -686,24 +866,34 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
                 lead['homeownerFirstName'] = first
                 lead['homeownerLastName']  = last
 
-    # San Diego-specific Application Information fields
-    kwh = get_field('Rounded Kilowatts Total System Size')
-    if kwh:
-        lead['systemSize'] = kwh + ' kW'
-    elec = get_field('Electrical Service Upgrade')
-    if elec: lead['electricalServiceUpgrade'] = elec
-    ess = get_field('Advanced Energy Storage System')
-    if ess: lead['advancedEnergyStorage'] = ess
-    cs = get_field('Cross Street')
-    if cs: lead['crossStreet'] = cs
-    dow = get_field('Description of Work')
-    if dow: lead['descriptionOfWork'] = dow
-    nob = get_field('Number of Buildings')
-    if nob: lead['numberOfBuildings'] = nob
-    hu = get_field('Housing Units')
-    if hu: lead['housingUnits'] = hu
+        # Application Information fields (non–Contacts-tab portals)
+        kwh = get_field('Rounded Kilowatts Total System Size')
+        if kwh:
+            lead['systemSize'] = kwh + ' kW'
+        elec = get_field('Electrical Service Upgrade')
+        if elec:
+            lead['electricalServiceUpgrade'] = elec
+        ess = get_field('Advanced Energy Storage System')
+        if ess:
+            lead['advancedEnergyStorage'] = ess
+        cs = get_field('Cross Street')
+        if cs:
+            lead['crossStreet'] = cs
+        dow = get_field('Description of Work')
+        if dow:
+            lead['descriptionOfWork'] = dow
+        nob = get_field('Number of Buildings')
+        if nob:
+            lead['numberOfBuildings'] = nob
+        hu = get_field('Housing Units')
+        if hu:
+            lead['housingUnits'] = hu
 
-    log.info(f'  jobValue={lead.get("jobValue","?")} | size={lead.get("systemSize","?")} | owner={lead.get("homeownerFirstName","")} {lead.get("homeownerLastName","")}')
+    log.info(
+        f'  jobValue={lead.get("jobValue","?")} | size={lead.get("systemSize","?")} | '
+        f'elec={lead.get("electricalServiceUpgrade","?")} | ess={lead.get("advancedEnergyStorage","?")} | '
+        f'owner={lead.get("homeownerFirstName","")} {lead.get("homeownerLastName","")}'
+    )
 
 
 def _set_defaults(lead):
