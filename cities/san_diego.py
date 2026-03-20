@@ -10,8 +10,11 @@ CONFIGS = {
         'pds_entry_link_names': ['PDS'],
         'module':             'Building',
         # Dropdown label must match portal option text (see ddlGSPermitType)
-        'permit_type':        'Residential Alteration or Addition - PI',
+        'permit_type':        'Residential Alteration or Addition - Plan Check-Permit',
         'use_project_name':   'otc',
+        'prefer_csv_download': True,
+        # OTC rows usually say "OTC" in description, not "solar" — skip HTML keyword gate
+        'skip_solar_description_filter': True,
         'source':             'san_diego_accela',
         'lead_category':      'residential',
         'daily_only':         True,
@@ -34,6 +37,7 @@ CONFIGS = {
         'module':             'Building',
         'permit_type':        'Commercial Alteration or Addition - PI',
         'use_project_name':   None,
+        'prefer_csv_download': True,
         'source':             'san_diego_accela',
         'lead_category':      'commercial',
         'daily_only':         True,

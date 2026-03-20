@@ -98,8 +98,11 @@ def parse_system_size(text):
     return ''
 
 
+import csv
+import json
 import logging
 import os
+import tempfile
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
@@ -231,6 +234,173 @@ async def _resolve_accela_search_surface(page, config: dict, city_name: str):
     return page
 
 
+def _csv_norm_key(k):
+    return re.sub(r'[^a-z0-9]', '', (k or '').lower())
+
+
+def _csv_get(row: dict, *aliases: str) -> str:
+    """First non-empty cell matching common Accela export header variants."""
+    if not row:
+        return ''
+    by_norm = {_csv_norm_key(k): (k, v) for k, v in row.items()}
+    for a in aliases:
+        na = _csv_norm_key(a)
+        if na in by_norm:
+            v = by_norm[na][1]
+            if v is not None and str(v).strip():
+                return str(v).strip()
+    return ''
+
+
+def _accela_row_passes_filters(description: str, short_notes: str, status: str,
+                               permit_date_str: str, cfg: dict) -> bool:
+    """Same rules as HTML row scrape (short notes / solar keywords / issued age)."""
+    desc_lower = (description or '').lower()
+    short_notes_filter = cfg.get('short_notes_filter', None)
+    if short_notes_filter:
+        if short_notes_filter.lower() not in (short_notes or '').lower():
+            return False
+    elif cfg.get('skip_solar_description_filter'):
+        pass
+    else:
+        INCLUDE_KEYWORDS = [
+            'solar', 'pv', 'photovoltaic', 'panel', 'module', 'kw', 'kwp',
+            'energy storage', 'powerwall', 'battery', 'ess',
+        ]
+        EXCLUDE_PATTERNS = [
+            'ev charger', 'ev charge', 'level ii ev', 'level 2 ev',
+            'uninstall and reinstall', 'reinstall existing', 'reinstall of existing',
+            'lift and reinstall', 'uninstallation and reinstallation',
+            'removal and reinstall', 'removal & re-install', 'removal & reinstall',
+            'remove & re-install', 'remove and reinstall',
+            'removal and reinstallation',
+        ]
+        has_solar_or_battery = any(kw in desc_lower for kw in INCLUDE_KEYWORDS)
+        is_excluded = any(kw in desc_lower for kw in EXCLUDE_PATTERNS)
+        if not (has_solar_or_battery and not is_excluded):
+            return False
+
+    issued_filter_days = cfg.get('issued_filter_days', 7)
+    if (status or '').lower() == 'issued' and permit_date_str:
+        try:
+            from datetime import datetime
+            permit_date = datetime.strptime(permit_date_str, '%m/%d/%Y')
+            if (datetime.now() - permit_date).days > issued_filter_days:
+                return False
+        except Exception:
+            pass
+    return True
+
+
+def _leads_from_accela_csv_path(path: str, config: dict, source: str,
+                                base_url: str, module: str) -> list:
+    """Parse Accela export CSV into the same lead dicts as _scrape_rows."""
+    cfg = config or {}
+    leads = []
+    with open(path, 'r', encoding='utf-8-sig', newline='') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            permit_num = _csv_get(row, 'Permit #', 'Record ID', 'Record Id', 'Permit Number', 'Permit No')
+            if not permit_num or permit_num.lower() in ('log in', 'login'):
+                continue
+            description = _csv_get(row, 'Permit Description', 'Description', 'Work Description')
+            short_notes = _csv_get(row, 'Short Notes', 'Comments')
+            status = _csv_get(row, 'Status', 'Record Status')
+            permit_date_str = _csv_get(row, 'Date', 'File Date', 'Opened Date')
+            project_name = _csv_get(row, 'Project Name', 'Project')
+            permit_type = _csv_get(row, 'Permit Type', 'Record Type', 'Type')
+            raw_address = _csv_get(row, 'Address', 'Location', 'Site Address', 'Parcel Address')
+
+            if not _accela_row_passes_filters(description, short_notes, status, permit_date_str, cfg):
+                log.info(f'  CSV skip (filter): {(description or permit_num)[:60]}')
+                continue
+
+            address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
+            zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', address)
+            zip_code = zip_match.group(1) if zip_match else ''
+
+            owner_first, owner_last = extract_homeowner_name(description, project_name)
+            system_size = parse_system_size(description)
+            lead_category = cfg.get('lead_category', 'residential')
+
+            leads.append({
+                'homeownerFirstName':   owner_first,
+                'homeownerLastName':    owner_last,
+                'permitNumber':         permit_num,
+                'permitUrl':            f'{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}' if permit_num else '',
+                'date':                 permit_date_str,
+                'siteAddress':          address,
+                'zipCode':              zip_code,
+                'city':                 cfg.get('name', ''),
+                'description':          description,
+                'systemSize':           system_size,
+                'numberOfPanels':       '',
+                'jobValue':             '',
+                'status':               status,
+                'subType':              '',
+                'occupancyType':        '',
+                'licensedProfessional': '',
+                'projectName':          project_name,
+                'permitType':           permit_type,
+                'leadCategory':         lead_category,
+                'source':               source,
+                'enrichmentStage':      'scraped',
+                'uniqueId':             f'{cfg.get("source", source)}_{permit_num}',
+                'detailHref':           None,
+                '_owner_from_contacts':  cfg.get('owner_from_contacts', False),
+            })
+
+    seen = set()
+    unique = []
+    for lead in leads:
+        pn = lead.get('permitNumber', '')
+        if pn and pn not in seen:
+            seen.add(pn)
+            unique.append(lead)
+        elif not pn:
+            unique.append(lead)
+    log.info(f'  CSV parsed: {len(unique)} unique permits (from {len(leads)} rows)')
+    return unique
+
+
+async def _download_accela_results_csv(search, city_name: str, source: str) -> str:
+    """
+    Click Accela export and save CSV to a temp file. Returns path.
+    """
+    export_selectors = [
+        'a[id*="lnkExport"]',
+        'a[title*="Export"]',
+        'a[title*="Download"]',
+        'a:text("Export")',
+        'a:text("Download")',
+        'input[value*="Export"]',
+        'input[value*="export"]',
+    ]
+    log.info(f'[{city_name}] Downloading results CSV (export)...')
+    await search.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
+    await search.wait_for_timeout(400)
+    async with search.expect_download(timeout=120000) as dl_info:
+        clicked = False
+        for sel in export_selectors:
+            try:
+                loc = search.locator(sel)
+                if await loc.count() > 0:
+                    await loc.first.click(timeout=8000)
+                    clicked = True
+                    log.info(f'[{city_name}] Triggered export via: {sel}')
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            raise RuntimeError('No CSV/Export control found on results page')
+    download = await dl_info.value
+    fd, path = tempfile.mkstemp(suffix='.csv', prefix=f'accela_{source}_')
+    os.close(fd)
+    await download.save_as(path)
+    log.info(f'[{city_name}] CSV saved: {path} ({download.suggested_filename})')
+    return path
+
+
 # ---------------------------------------------------------------------------
 # Generic Accela scraper
 # ---------------------------------------------------------------------------
@@ -322,11 +492,13 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                             ).map(o => o.text)
                         """)
                         log.info(f'[{city_name}] Permit type options: {options}')
+                        _pt = json.dumps(config['permit_type'])
                         await search.evaluate(f"""
                             () => {{
                                 const sel = document.querySelector('{type_sel}');
+                                const want = {_pt};
                                 const opt = Array.from(sel.options).find(
-                                    o => o.text.trim() === '{config["permit_type"]}'
+                                    o => o.text.trim() === want
                                 );
                                 if (opt) {{
                                     sel.value = opt.value;
@@ -409,8 +581,26 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             )
             log.info(f'[{city_name}] Results loaded')
 
-            log.info(f'[{city_name}] Scraping filtered results...')
-            leads = await _scrape_rows(search, source, base_url, module, config)
+            leads = []
+            if config.get('prefer_csv_download'):
+                csv_path = None
+                try:
+                    csv_path = await _download_accela_results_csv(search, city_name, source)
+                    leads = _leads_from_accela_csv_path(
+                        csv_path, config, source, base_url, module,
+                    )
+                except Exception as e:
+                    log.warning(f'[{city_name}] CSV export failed, using HTML grid: {e}')
+                    leads = await _scrape_rows(search, source, base_url, module, config)
+                finally:
+                    if csv_path and os.path.isfile(csv_path):
+                        try:
+                            os.unlink(csv_path)
+                        except OSError:
+                            pass
+            else:
+                log.info(f'[{city_name}] Scraping filtered results (HTML)...')
+                leads = await _scrape_rows(search, source, base_url, module, config)
             log.info(f'[{city_name}] Found {len(leads)} permits in date range')
 
             for i, lead in enumerate(leads):
@@ -481,49 +671,14 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 permit_num = link_text if link_text else (raw_cells[2] if len(raw_cells) > 2 else '')
 
             description = raw_cells[col_description] if len(raw_cells) > col_description else ''
-            desc_lower = description.lower()
-
-            # San Diego commercial: filter by short notes containing config value (e.g. "8004")
-            short_notes_filter = cfg.get('short_notes_filter', None)
-            if short_notes_filter:
-                col_sn = cfg.get('col_short_notes', 8)
-                short_notes = raw_cells[col_sn] if len(raw_cells) > col_sn else ''
-                if short_notes_filter.lower() not in short_notes.lower():
-                    log.info(f'  Skipping (no {short_notes_filter} in notes): {short_notes[:60]}')
-                    continue
-            else:
-                INCLUDE_KEYWORDS = [
-                    'solar', 'pv', 'photovoltaic', 'panel', 'module', 'kw', 'kwp',
-                    'energy storage', 'powerwall', 'battery', 'ess',
-                ]
-                EXCLUDE_PATTERNS = [
-                    'ev charger', 'ev charge', 'level ii ev', 'level 2 ev',
-                    'uninstall and reinstall', 'reinstall existing', 'reinstall of existing',
-                    'lift and reinstall', 'uninstallation and reinstallation',
-                    'removal and reinstall', 'removal & re-install', 'removal & reinstall',
-                    'remove & re-install', 'remove and reinstall',
-                    'removal and reinstallation',
-                ]
-                has_solar_or_battery = any(kw in desc_lower for kw in INCLUDE_KEYWORDS)
-                is_excluded = any(kw in desc_lower for kw in EXCLUDE_PATTERNS)
-                if not (has_solar_or_battery and not is_excluded):
-                    log.info(f'  Skipping (not new install): {description[:60]}')
-                    continue
-
+            col_sn = cfg.get('col_short_notes', 8)
+            short_notes = raw_cells[col_sn] if len(raw_cells) > col_sn else ''
             status = raw_cells[col_status] if col_status is not None and len(raw_cells) > col_status else ''
             permit_date_str = raw_cells[col_date] if len(raw_cells) > col_date else ''
 
-            issued_filter_days = cfg.get('issued_filter_days', 7)
-            if status.lower() == 'issued' and permit_date_str:
-                try:
-                    from datetime import datetime
-                    permit_date = datetime.strptime(permit_date_str, '%m/%d/%Y')
-                    days_old = (datetime.now() - permit_date).days
-                    if days_old > issued_filter_days:
-                        log.info(f'  Skipping (issued {days_old}d ago): {description[:50]}')
-                        continue
-                except Exception:
-                    pass
+            if not _accela_row_passes_filters(description, short_notes, status, permit_date_str, cfg):
+                log.info(f'  Skipping (filter): {(description or permit_num)[:60]}')
+                continue
 
             project_name = raw_cells[col_project_name] if col_project_name is not None and len(raw_cells) > col_project_name else ''
 
