@@ -1,0 +1,7 @@
+flask
+requests
+beautifulsoup4
+lxml
+gunicorn
+playwright
+APScheduler==3.10.4
