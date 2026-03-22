@@ -16,6 +16,8 @@ Required fields: `name`, `base_url`, `module`, `source`
 
 Optional: `permit_type`, `portal_url` (entry page when it’s not the standard `Cap/CapHome` URL — e.g. San Diego County), `col_date`, `col_permit_num`, `lead_category`, etc. See existing city files for examples.
 
+**Results:** By default `scraper_accela` tries **CSV export** first (all columns preserved on each lead as `accelaCsv`), then falls back to HTML grid scraping. Set **`skip_csv_download: True`** on a city to force HTML-only.
+
 ## Run multi-city scan on Render (production Playwright)
 
 From your laptop (writes JSON locally):

@@ -1,10 +1,16 @@
-"""Oakland — Accela portal."""
+"""Oakland — Accela portal.
+
+Two Building record types to scrape (must match <option> text exactly):
+  - oakland:         Solar Permit (…SolarApp+… exclusions…)
+  - oakland_solarapp: SolarApp+ (…38.4kw… SolarApp+- contractor use)
+"""
 
 CONFIGS = {
     'oakland': {
         'name':        'Oakland',
         'base_url':    'https://aca-prod.accela.com/OAKLAND',
         'module':      'Building',
+        # Screenshot / portal dropdown — exact string
         'permit_type': 'Solar Permit (For commercial projects, residential projects not eligible for SolarApp+, or owner/builder or contractor use)',
         'source':      'oakland_accela',
         'col_date':         1,
@@ -21,6 +27,7 @@ CONFIGS = {
         'name':        'Oakland',
         'base_url':    'https://aca-prod.accela.com/OAKLAND',
         'module':      'Building',
+        # Screenshot / portal dropdown — exact string (note SolarApp+- before "contractor")
         'permit_type': 'SolarApp+ (For roof mounted residential solar projects not exceeding 38.4kw total done with SolarApp+- contractor use)',
         'source':      'oakland_accela',
         'lead_category': 'residential',

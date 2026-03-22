@@ -292,14 +292,32 @@ def _accela_row_passes_filters(description: str, short_notes: str, status: str,
     return True
 
 
+def _accela_csv_row_raw(row: dict) -> dict:
+    """All columns from export as stripped strings (source of truth blob)."""
+    out = {}
+    for k, v in (row or {}).items():
+        if k is None:
+            continue
+        key = str(k).strip()
+        if not key:
+            continue
+        out[key] = '' if v is None else str(v).strip()
+    return out
+
+
 def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                                 base_url: str, module: str) -> list:
-    """Parse Accela export CSV into the same lead dicts as _scrape_rows."""
+    """
+    Parse Accela export CSV in one pass: map known fields + attach full row as accelaCsv.
+    """
     cfg = config or {}
     leads = []
     with open(path, 'r', encoding='utf-8-sig', newline='') as f:
         reader = csv.DictReader(f)
+        if reader.fieldnames:
+            log.info(f'  CSV columns ({len(reader.fieldnames)}): {reader.fieldnames[:20]}{"..." if len(reader.fieldnames) > 20 else ""}')
         for row in reader:
+            raw = _accela_csv_row_raw(row)
             permit_num = _csv_get(row, 'Permit #', 'Record ID', 'Record Id', 'Permit Number', 'Permit No')
             if not permit_num or permit_num.lower() in ('log in', 'login'):
                 continue
@@ -320,7 +338,14 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
             zip_code = zip_match.group(1) if zip_match else ''
 
             owner_first, owner_last = extract_homeowner_name(description, project_name)
-            system_size = parse_system_size(description)
+            system_size = parse_system_size(description) or parse_system_size(project_name)
+            if not system_size:
+                for hk, hv in raw.items():
+                    lhk = (hk or '').lower()
+                    if any(x in lhk for x in ('description', 'project', 'note', 'work', 'scope')):
+                        system_size = parse_system_size(hv)
+                        if system_size:
+                            break
             lead_category = cfg.get('lead_category', 'residential')
 
             leads.append({
@@ -342,12 +367,15 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                 'licensedProfessional': '',
                 'projectName':          project_name,
                 'permitType':           permit_type,
+                'shortNotes':           short_notes,
                 'leadCategory':         lead_category,
                 'source':               source,
                 'enrichmentStage':      'scraped',
                 'uniqueId':             f'{cfg.get("source", source)}_{permit_num}',
                 'detailHref':           None,
                 '_owner_from_contacts':  cfg.get('owner_from_contacts', False),
+                # Full export row — all portal columns in one place for APIs / debugging
+                'accelaCsv':            raw,
             })
 
     seen = set()
@@ -361,6 +389,45 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
             unique.append(lead)
     log.info(f'  CSV parsed: {len(unique)} unique permits (from {len(leads)} rows)')
     return unique
+
+
+async def _inject_search_project_name(search, city_name: str, value: str) -> bool:
+    """
+    Set Accela general-search Project Name (e.g. OTC). Playwright fill() can fail silently
+    (strict mode, hidden duplicates); match date injection via DOM + events.
+    """
+    raw = (value or '').strip()
+    if not raw:
+        return False
+    want_js = json.dumps(raw)
+    result = await search.evaluate(
+        f"""
+        () => {{
+            const want = {want_js};
+            const el = document.querySelector('[id*="txtGSProjectName"]')
+                || document.querySelector('input[name*="txtGSProjectName" i]')
+                || document.querySelector('input[id*="ProjectName" i]');
+            if (!el) return {{ ok: false, reason: 'no matching input' }};
+            el.focus();
+            el.value = want;
+            el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+            el.dispatchEvent(new Event('blur', {{ bubbles: true }}));
+            return {{ ok: true, id: el.id, value: el.value }};
+        }}
+        """
+    )
+    if result.get('ok'):
+        log.info(
+            f'[{city_name}] Project name filter set to {result.get("value")!r} '
+            f'(#{result.get("id")})'
+        )
+        return True
+    log.warning(
+        f'[{city_name}] Project name filter NOT applied ({result.get("reason")}) '
+        f'— wanted {raw!r}'
+    )
+    return False
 
 
 async def _download_accela_results_csv(search, city_name: str, source: str) -> str:
@@ -379,7 +446,9 @@ async def _download_accela_results_csv(search, city_name: str, source: str) -> s
     log.info(f'[{city_name}] Downloading results CSV (export)...')
     await search.evaluate('() => window.scrollTo(0, document.body.scrollHeight)')
     await search.wait_for_timeout(400)
-    async with search.expect_download(timeout=120000) as dl_info:
+    # Downloads attach to Page; Frame has no expect_download.
+    download_page = search if hasattr(search, 'expect_download') else search.page
+    async with download_page.expect_download(timeout=120000) as dl_info:
         clicked = False
         for sel in export_selectors:
             try:
@@ -506,8 +575,13 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                                 }}
                             }}
                         """)
-                        await page.wait_for_load_state('networkidle')
-                        await page.wait_for_timeout(2000)
+                        # Accela keeps long-polling / beacon traffic — networkidle often times out.
+                        await search.wait_for_timeout(1500)
+                        try:
+                            await page.wait_for_load_state('domcontentloaded', timeout=12000)
+                        except Exception:
+                            pass
+                        await search.wait_for_timeout(1000)
                         log.info(f'[{city_name}] Permit type selected')
                 except Exception as e:
                     log.warning(f'[{city_name}] Could not select permit type: {e}')
@@ -543,10 +617,9 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             log.info(f'[{city_name}] Dates verified: {dates_check}')
 
             if config.get('use_project_name'):
-                try:
-                    await search.fill('[id*="txtGSProjectName"]', config['use_project_name'])
-                except Exception:
-                    pass
+                await _inject_search_project_name(
+                    search, city_name, str(config['use_project_name'])
+                )
 
             # Click Search
             log.info(f'[{city_name}] Clicking Search...')
@@ -581,9 +654,14 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             )
             log.info(f'[{city_name}] Results loaded')
 
+            # CSV export first for all cities (full row → accelaCsv); HTML grid is fallback.
+            # Set skip_csv_download: True in city config to force HTML-only.
             leads = []
-            if config.get('prefer_csv_download'):
-                csv_path = None
+            csv_path = None
+            if config.get('skip_csv_download'):
+                log.info(f'[{city_name}] skip_csv_download set — using HTML grid only')
+                leads = await _scrape_rows(search, source, base_url, module, config)
+            else:
                 try:
                     csv_path = await _download_accela_results_csv(search, city_name, source)
                     leads = _leads_from_accela_csv_path(
@@ -598,9 +676,6 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                             os.unlink(csv_path)
                         except OSError:
                             pass
-            else:
-                log.info(f'[{city_name}] Scraping filtered results (HTML)...')
-                leads = await _scrape_rows(search, source, base_url, module, config)
             log.info(f'[{city_name}] Found {len(leads)} permits in date range')
 
             for i, lead in enumerate(leads):

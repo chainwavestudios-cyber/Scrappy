@@ -49,6 +49,9 @@ BASE44_INGEST_URL = f'{BASE44_BASE_URL}/ingestSolarPermits'
 # Set BASE44_ENABLED=true in Render env when ready to push data
 BASE44_ENABLED = os.environ.get('BASE44_ENABLED', 'false').lower() == 'true'
 
+# Cap cities per campaign / runscan (Playwright + timeout safety). Override if needed.
+MAX_CITIES_PER_JOB = max(1, int(os.environ.get('MAX_CITIES_PER_JOB', '5')))
+
 
 def post_to_base44(leads, city, start_date, end_date, campaign_id=None):
     if not BASE44_ENABLED:
@@ -165,6 +168,12 @@ def scrape_campaign():
         return jsonify({'success': False, 'error': 'campaignId is required'}), 400
     if not cities:
         return jsonify({'success': False, 'error': 'cities array is required'}), 400
+    if len(cities) > MAX_CITIES_PER_JOB:
+        return jsonify({
+            'success': False,
+            'error': f'At most {MAX_CITIES_PER_JOB} cities per campaign (got {len(cities)}). '
+                     'Split into multiple jobs or set MAX_CITIES_PER_JOB.',
+        }), 400
 
     if data.get('startDate') and data.get('endDate'):
         start_date = data['startDate']
@@ -292,6 +301,8 @@ def runscan_help():
         'header_optional': 'x-internal-secret: <INTERNAL_SECRET> (required if set on server)',
         'note':           'Runs Accela scraper on this host. Use runscan.py --remote <url> from your laptop.',
         'timeout':        'Long requests may hit Render/proxy limits — shorten days/cities if needed.',
+        'max_cities':     MAX_CITIES_PER_JOB,
+        'note_cities':    f'POST /runscan/sync allows at most {MAX_CITIES_PER_JOB} resolved Accela cities per request (env MAX_CITIES_PER_JOB).',
     })
 
 
@@ -315,7 +326,15 @@ def runscan_sync():
     cities = [str(c) for c in cities]
 
     try:
-        from runscan_core import execute_runscan
+        from runscan_core import execute_runscan, count_resolved_cities
+        n = count_resolved_cities(cities)
+        if n > MAX_CITIES_PER_JOB:
+            return jsonify({
+                'success': False,
+                'error': f'At most {MAX_CITIES_PER_JOB} resolved cities per runscan (got {n}). '
+                         'Use fewer tokens (e.g. san_diego_res only) or split requests. '
+                         'Override: MAX_CITIES_PER_JOB.',
+            }), 400
         payload = execute_runscan(days, cities)
     except ValueError as e:
         return jsonify({'success': False, 'error': str(e)}), 400

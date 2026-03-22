@@ -68,6 +68,15 @@ def resolve_city_keys(
     return keys, warnings
 
 
+def count_resolved_cities(city_tokens: list[str]) -> int:
+    """How many Accela city keys `city_tokens` expand to (for job-size limits)."""
+    from scraper_accela import CITY_CONFIGS
+
+    valid_keys = set(CITY_CONFIGS.keys())
+    city_keys, _ = resolve_city_keys(city_tokens, valid_keys)
+    return len(city_keys)
+
+
 def date_range_for_days(days: int) -> tuple[str, str]:
     """Inclusive range: `days` calendar days ending today."""
     if days < 1:
