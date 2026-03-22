@@ -46,14 +46,29 @@ BASE44_BASE_URL   = os.environ.get('BASE44_BASE_URL',
                       f'https://{BASE44_DOMAIN}/api/apps/{BASE44_APP_ID}/functions')
 BASE44_INGEST_URL = f'{BASE44_BASE_URL}/ingestSolarPermits'
 
+# Single-tenant default for ingestSolarPermits (always sent on each lead unless overridden).
+HARDCODED_BASE44_ORGANIZATION_ID = '69ac768167fa5ab007eb6ae8'
+
 # Set BASE44_ENABLED=true in Render env when ready to push data
 BASE44_ENABLED = os.environ.get('BASE44_ENABLED', 'false').lower() == 'true'
+
+# Per-lead organization_id: /scrape/campaign organizationId, then env, then hardcoded above.
+BASE44_ORGANIZATION_ID = (
+    os.environ.get('BASE44_ORGANIZATION_ID') or HARDCODED_BASE44_ORGANIZATION_ID
+).strip()
 
 # Cap cities per campaign / runscan (Playwright + timeout safety). Override if needed.
 MAX_CITIES_PER_JOB = max(1, int(os.environ.get('MAX_CITIES_PER_JOB', '5')))
 
 
-def post_to_base44(leads, city, start_date, end_date, campaign_id=None):
+def post_to_base44(
+    leads,
+    city,
+    start_date,
+    end_date,
+    campaign_id=None,
+    organization_id=None,
+):
     if not BASE44_ENABLED:
         log.info('[Base44] DISABLED — set BASE44_ENABLED=true in Render env to enable')
         print(f'[Base44] DISABLED — would have posted {len(leads)} leads from {city}')
@@ -62,6 +77,8 @@ def post_to_base44(leads, city, start_date, end_date, campaign_id=None):
     if not BASE44_SECRET:
         log.warning('INTERNAL_SECRET not set — skipping Base44 post')
         return
+
+    org = (organization_id or BASE44_ORGANIZATION_ID or HARDCODED_BASE44_ORGANIZATION_ID).strip()
 
     city_label = city.replace('_', ' ').title()
     scraped_at = datetime.utcnow().isoformat() + 'Z'
@@ -73,6 +90,7 @@ def post_to_base44(leads, city, start_date, end_date, campaign_id=None):
         lead['uniqueId']        = f"{city}_{lead.get('permitNumber', '')}"
         lead['enrichmentStage'] = 'scraped'
         lead['scrapedAt']       = scraped_at
+        lead['organization_id'] = org
         if campaign_id:
             lead['campaignId'] = campaign_id
 
@@ -127,13 +145,16 @@ def get_scraper(city: str):
                      f'{", ".join(CITY_CONFIGS.keys())}')
 
 
-def run_and_post(city, start_date, end_date, campaign_id=None):
+def run_and_post(city, start_date, end_date, campaign_id=None, organization_id=None):
     try:
         scrape_fn, kwargs = get_scraper(city)
         leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs) \
                 if kwargs else scrape_fn(start_date, end_date)
         print(f'Scraped {len(leads)} leads from {city}')
-        post_to_base44(leads, city, start_date, end_date, campaign_id)
+        post_to_base44(
+            leads, city, start_date, end_date, campaign_id,
+            organization_id=organization_id,
+        )
         return leads
     except Exception as e:
         print(f'Scrape failed [{city}]: {e}')
@@ -152,8 +173,27 @@ def index():
         'service':          'scrappy',
         'base44_enabled':   BASE44_ENABLED,
         'available_cities': ['san_diego', 'los_angeles'] + list(CITY_CONFIGS.keys()),
+        'campaign_cities':  'GET /campaign/cities — keys + labels for Base44 templates',
         'runscan':          'GET /runscan — multi-city test scan on server (POST /runscan/sync)',
     })
+
+
+@app.route('/campaign/cities', methods=['GET'])
+def campaign_cities():
+    """
+    Accela city keys for PermitCampaign UI — use these exact strings in POST /scrape/campaign cities[].
+    Public read-only (no secret) so your app can sync labels; protect at the edge if needed.
+    """
+    from scraper_accela import CITY_CONFIGS
+
+    items = []
+    for key, cfg in sorted(CITY_CONFIGS.items(), key=lambda x: x[0]):
+        items.append({
+            'key':           key,
+            'label':         cfg.get('name', key),
+            'leadCategory':  (cfg.get('lead_category') or '').strip() or None,
+        })
+    return jsonify({'cities': items})
 
 
 @app.route('/scrape/campaign', methods=['POST'])
@@ -184,23 +224,28 @@ def scrape_campaign():
         start_date = start.strftime('%m/%d/%Y')
         end_date   = today.strftime('%m/%d/%Y')
 
+    _oid = data.get('organizationId') or data.get('organization_id')
+    organization_id = str(_oid).strip() if _oid is not None else ''
+    organization_id = organization_id or None
+
     for city in cities:
         thread = threading.Thread(
             target=run_and_post,
-            args=(city, start_date, end_date, campaign_id)
+            args=(city, start_date, end_date, campaign_id, organization_id),
         )
         thread.daemon = True
         thread.start()
 
     log.info(f'Campaign {campaign_id} started: {cities} {start_date} → {end_date}')
     return jsonify({
-        'status':     'started',
-        'campaignId': campaign_id,
-        'cities':     cities,
-        'startDate':  start_date,
-        'endDate':    end_date,
-        'days':       days,
-        'base44':     'enabled' if BASE44_ENABLED else 'disabled',
+        'status':          'started',
+        'campaignId':      campaign_id,
+        'cities':          cities,
+        'startDate':       start_date,
+        'endDate':         end_date,
+        'days':            days,
+        'organizationId':  organization_id,
+        'base44':          'enabled' if BASE44_ENABLED else 'disabled',
     })
 
 
