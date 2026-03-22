@@ -199,6 +199,9 @@ def campaign_cities():
 @app.route('/scrape/campaign', methods=['POST'])
 def scrape_campaign():
     """Campaign scrape — multiple cities, linked to a PermitCampaign ID."""
+    err = _check_internal_secret()
+    if err:
+        return err
     data        = request.json or {}
     campaign_id = data.get('campaignId')
     cities      = data.get('cities', [])

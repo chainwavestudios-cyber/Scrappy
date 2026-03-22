@@ -8,7 +8,10 @@ Scrappy does **not** run a cron. Your platform’s scheduler (hourly, every N ho
 
 **Endpoint**
 
-`POST https://<YOUR_RENDER_SERVICE>/scrape/campaign`
+`POST https://<YOUR_RENDER_SERVICE>/scrape/campaign`  
+
+Example host (confirm in your Render dashboard — custom domain may differ): `https://scrappy-au2o.onrender.com`  
+So: `SCRAPPY_URL=https://scrappy-au2o.onrender.com` (no trailing slash).
 
 **Content-Type:** `application/json`
 
@@ -27,7 +30,7 @@ Scrappy does **not** run a cron. Your platform’s scheduler (hourly, every N ho
 
 **Response (immediate):** `202`-style “started” JSON — scrapes run in **background threads**; ingest happens when each city finishes. This is **not** a synchronous list of leads.
 
-**Auth:** `/scrape/campaign` does **not** currently validate `x-internal-secret` (unlike `/runscan/sync`). Lock it down with a private URL, allowlist, or add a header check in `app.py` if the service is exposed.
+**Auth:** If Render has **`INTERNAL_SECRET`** set, **`POST /scrape/campaign`** requires header **`x-internal-secret`** with the same value (same behavior as **`/runscan/sync`**). In Base44 set **`SCRAPPY_INTERNAL_SECRET`** to match. If **`INTERNAL_SECRET`** is unset on Render, the header is not required (not recommended for production).
 
 ---
 
