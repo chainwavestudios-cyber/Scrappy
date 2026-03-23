@@ -780,25 +780,34 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                             pass
             log.info(f'[{city_name}] Found {len(leads)} permits in date range')
 
-            for i, lead in enumerate(leads):
-                permit_num = lead.get('permitNumber')
-                if not permit_num:
-                    continue
-                log.info(f'[{city_name}] Details {permit_num} ({i+1}/{len(leads)})...')
-                detail_context = await browser.new_context(
-                    viewport={'width': 1280, 'height': 800},
-                )
-                detail_page = await detail_context.new_page()
-                try:
-                    await _get_permit_details(
-                        detail_page, base_url, module, permit_num, lead, config,
-                    )
-                except Exception as e:
-                    log.error(f'[{city_name}] Detail failed {permit_num}: {e}')
+            if config.get('skip_detail_fetch'):
+                # Grid / CSV already has all fields; only set permit URL from row link + defaults.
+                for lead in leads:
+                    permit_num = lead.get('permitNumber')
+                    if not permit_num:
+                        continue
+                    _resolve_permit_url_from_href(base_url, permit_num, module, lead)
                     _set_defaults(lead)
-                finally:
-                    await detail_page.close()
-                    await detail_context.close()
+            else:
+                for i, lead in enumerate(leads):
+                    permit_num = lead.get('permitNumber')
+                    if not permit_num:
+                        continue
+                    log.info(f'[{city_name}] Details {permit_num} ({i+1}/{len(leads)})...')
+                    detail_context = await browser.new_context(
+                        viewport={'width': 1280, 'height': 800},
+                    )
+                    detail_page = await detail_context.new_page()
+                    try:
+                        await _get_permit_details(
+                            detail_page, base_url, module, permit_num, lead, config,
+                        )
+                    except Exception as e:
+                        log.error(f'[{city_name}] Detail failed {permit_num}: {e}')
+                        _set_defaults(lead)
+                    finally:
+                        await detail_page.close()
+                        await detail_context.close()
 
             leads = [l for l in leads if not l.get('_skip_ingest')]
             # Strip internal flags before returning
