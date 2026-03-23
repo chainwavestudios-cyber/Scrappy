@@ -3,6 +3,8 @@
 Two Building record types to scrape (must match <option> text exactly):
   - oakland:         Solar Permit (…SolarApp+… exclusions…)
   - oakland_solarapp: SolarApp+ (…38.4kw… SolarApp+- contractor use)
+
+Config keys: see cities/__init__.py (ACCELA_CITY_CONFIG_KEYS).
 """
 
 CONFIGS = {
