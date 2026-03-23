@@ -1506,7 +1506,9 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         else:
             lead['siteAddress'] = work_loc
 
-    # Project Description — often multiline (name + scope); single field for ingest
+    # Project Description — full multiline text → projectDescription (Base44). Homeowner
+    # name is parsed separately into homeownerFirstName/LastName; we never strip the name
+    # from projectDescription (entire block stays in one field).
     project_desc_clean = (
         _extract_labeled_multiline(soup, 'Project Description')
         or get_field('Project Description')
@@ -1574,11 +1576,16 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         hu = _get_field_from_soup(soup_app, 'Housing Units')
         if hu:
             lead['housingUnits'] = hu
-        # First pass skipped expand — Project Description may only exist after Record Details expand
+        # First pass skipped expand — full Project Description text after expand (multiline)
         if not (lead.get('projectDescription') or '').strip():
-            pd2 = _get_field_from_soup(soup_app, 'Project Description')
+            pd2 = (
+                _extract_labeled_multiline(soup_app, 'Project Description')
+                or _get_field_from_soup(soup_app, 'Project Description')
+            )
             if pd2:
                 lead['projectDescription'] = pd2
+                if not (lead.get('description') or '').strip():
+                    lead['description'] = pd2
     else:
         if project_desc_clean:
             # First line is often the homeowner (e.g. "TIMOTHY ANGLIN" then scope text)
