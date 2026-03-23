@@ -77,14 +77,22 @@ def extract_homeowner_name(description='', project_name=''):
     return '', ''
 
 
-def parse_system_size(text):
-    """Extract system size (kW/kWh) from any text string."""
+def parse_system_size(text, max_kw: float = 8000.0):
+    """
+    Extract system size (kW/kWh) from text. Skips absurd matches (IDs, phone
+    fragments) that accidentally sit next to kW/kWh in page blobs.
+    """
     if not text:
         return ''
-    # Match patterns like 7.425kwp, 8.8kw, 4.92KW, 10kwh, 13.2 kW
-    m = re.search(r'(\d+\.?\d*)\s*(kwp|kwh|kw|kip)', text, re.IGNORECASE)
-    if m:
-        val = m.group(1)
+    for m in re.finditer(
+        r'(\d+\.?\d*)\s*(kwp|kwh|kw|kip)\b', text, re.IGNORECASE
+    ):
+        try:
+            val = float(m.group(1))
+        except ValueError:
+            continue
+        if val <= 0 or val > max_kw:
+            continue
         unit = m.group(2).lower()
         if unit == 'kwp':
             unit = 'kW'
@@ -94,7 +102,7 @@ def parse_system_size(text):
             unit = 'kW'
         else:
             unit = 'kW'
-        return f'{val} {unit}'
+        return f'{m.group(1)} {unit}'
     return ''
 
 
@@ -987,6 +995,65 @@ def _get_field_from_soup(soup, label):
     return ''
 
 
+def _extract_labeled_multiline(soup, label: str) -> str:
+    """
+    Accela often puts 'Project Description' (and similar) in one td/div with
+    multiple lines: label row then body text (e.g. owner name + scope).
+    """
+    lbl_low = label.lower().strip()
+    for el in soup.find_all(['td', 'div', 'span', 'label']):
+        txt = el.get_text(separator='\n', strip=True)
+        if not txt or len(txt) < 8:
+            continue
+        lines = [x.strip() for x in txt.splitlines() if x.strip()]
+        if not lines:
+            continue
+        top = lines[0]
+        tl = top.lower().rstrip(':').strip()
+        if tl == lbl_low and len(lines) > 1:
+            return '\n'.join(lines[1:]).strip()
+        if tl.startswith(lbl_low + ':'):
+            rest = top.split(':', 1)[1].strip()
+            body = ([rest] if rest else []) + lines[1:]
+            if body:
+                return '\n'.join(body).strip()
+    return ''
+
+
+def _job_value_money_from_page_text(blob: str) -> str:
+    """Chula Vista: Job Value($) under More Details → Additional Information."""
+    if not blob:
+        return ''
+    patterns = [
+        r'Job\s*Value\s*\(\s*\$\s*\)\s*:?\s*(\$[\d,]+(?:\.\d{2})?)',
+        r'Job\s*Value\s*\(\s*\$\s*\)\s*:?\s*([\d,]+(?:\.\d{2})?)\s*(?:USD)?',
+        r'Job\s*Value\s*:?\s*(\$[\d,]+(?:\.\d{2})?)',
+        r'Valuation\s*:?\s*(\$[\d,]+(?:\.\d{2})?)',
+        r'Valuation\s*:?\s*([\d,]+(?:\.\d{2})?)\b',
+    ]
+    for pat in patterns:
+        m = re.search(pat, blob, re.I)
+        if m:
+            s = m.group(1).strip()
+            if s and re.search(r'\d', s):
+                return s if s.startswith('$') else f'${s}'
+    return ''
+
+
+def _clean_accela_job_value(val: str) -> str:
+    if not val:
+        return ''
+    s = val.strip()
+    low = s.lower().rstrip(':').strip()
+    if low in ('valuation', 'job value', 'job value($)', 'n/a', '-', ''):
+        return ''
+    if low.startswith('valuation') and not re.search(r'\d', s):
+        return ''
+    if low.startswith('job value') and not re.search(r'\d', s) and '$' not in s:
+        return ''
+    return s
+
+
 def _extract_work_location_accela(soup):
     """
     Chula Vista / Accela often put site address under 'Work Location' as:
@@ -1043,50 +1110,47 @@ def _extract_work_location_accela(soup):
 
 def _extract_job_value_accela(soup):
     """
-    Prefer 'Job Value($)' / 'Job Value' under Additional Information (Chula Vista).
-    Fall back to empty so caller can try legacy 'Valuation' parsing.
+    Chula Vista: More Details → Additional Information → Job Value($): $45,000.00
+    Prefer full-page regex so we never return bare labels like 'Valuation:'.
     """
+    blob = soup.get_text('\n', strip=True)
+    blob_sp = soup.get_text(' ', strip=True)
+    v = _job_value_money_from_page_text(blob) or _job_value_money_from_page_text(blob_sp)
+    if v:
+        return v
+
     for lbl in ('Job Value($)', 'Job Value', 'Valuation'):
-        v = _get_field_from_soup(soup, lbl)
-        if v and len(v) < 200:
-            return v
+        raw = _get_field_from_soup(soup, lbl)
+        c = _clean_accela_job_value(raw)
+        if c and len(c) < 200:
+            return c
 
     for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
         t = el.get_text(strip=True)
         tl = t.lower()
-        if 'job value' not in tl or len(t) > 60:
+        if 'job value' not in tl or len(t) > 120:
             continue
         if ':' in t:
             parts = t.split(':', 1)
             if len(parts) == 2 and parts[1].strip():
-                return parts[1].strip()
+                c = _clean_accela_job_value(parts[1].strip())
+                if c:
+                    return c
         nxt = el.find_next_sibling()
         if nxt and getattr(nxt, 'get_text', None):
             val = nxt.get_text(strip=True)
-            if val:
-                return val
+            c = _clean_accela_job_value(val)
+            if c:
+                return c
         tr = el.find_parent('tr')
         if tr:
-            ntr = tr.find_next_sibling('tr')
-            if ntr:
-                val = ntr.get_text(separator=' ', strip=True)
-                if val:
-                    return val
             tds = tr.find_all('td')
             for i, td in enumerate(tds):
                 if 'job value' in td.get_text().lower() and i + 1 < len(tds):
                     val2 = tds[i + 1].get_text(strip=True)
-                    if val2:
-                        return val2
-
-    blob = soup.get_text(' ', strip=True)
-    m = re.search(
-        r'Job Value\s*\(\s*\$\s*\)\s*:?\s*(\$?\s*[\d,]+\.?\d*)',
-        blob,
-        re.I,
-    )
-    if m:
-        return re.sub(r'\s+', '', m.group(1))
+                    c = _clean_accela_job_value(val2)
+                    if c:
+                        return c
     return ''
 
 
@@ -1300,6 +1364,8 @@ async def _expand_accela_detail_sections(detail_page):
         }
     """)
     await detail_page.wait_for_timeout(1500)
+    # Chula Vista: Job Value($) / Project Description render after panel paints
+    await detail_page.wait_for_timeout(1200)
 
 
 async def _click_record_details_tab(detail_page):
@@ -1358,11 +1424,12 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
             for sibling in parent.next_siblings:
                 text = sibling.get_text(strip=True) if hasattr(sibling, 'get_text') else str(sibling).strip()
                 if text and text.replace(',', '').replace('.', '').replace('$', '').strip().isdigit():
-                    job_value = text
+                    job_value = _clean_accela_job_value(text)
                     break
-                elif text and text not in ('', 'Valuation:', 'Valuation'):
-                    job_value = text
-                    break
+                elif text:
+                    job_value = _clean_accela_job_value(text)
+                    if job_value:
+                        break
             if job_value:
                 break
 
@@ -1373,21 +1440,22 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
                 nxt = el.find_next_sibling()
                 if nxt:
                     val = nxt.get_text(strip=True)
-                    if val and val.lower() not in ('valuation', ''):
-                        job_value = val
+                    job_value = _clean_accela_job_value(val)
+                    if job_value:
                         break
                 parent = el.find_parent()
                 if parent:
                     nxt2 = parent.find_next_sibling()
                     if nxt2:
                         val2 = nxt2.get_text(separator=' ', strip=True)
-                        if val2 and val2.lower() not in ('valuation', ''):
-                            job_value = val2
+                        job_value = _clean_accela_job_value(val2)
+                        if job_value:
                             break
 
     JS_INDICATORS = ['function', 'CDATA', 'document.', 'var ', 'ACADialog']
     if any(ind in str(job_value) for ind in JS_INDICATORS):
         job_value = ''
+    job_value = _clean_accela_job_value(job_value or '')
     lead['jobValue'] = job_value
 
     # ---------------------------------------------------------------------------
@@ -1430,7 +1498,25 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     lead['occupancyType']  = get_field('What is the occupancy type?')
     lead['numberOfPanels'] = get_field('Number of Panels') or get_field('Number of Modules')
 
-    # System size — try detail page fields first, fall back to what was parsed from description
+    # Work Location first — Chula Vista: main record shows multiline under Work Location
+    work_loc = _extract_work_location_accela(soup)
+    if work_loc:
+        if owner_fc and (lead.get('siteAddress') or lead.get('address') or '').strip():
+            pass
+        else:
+            lead['siteAddress'] = work_loc
+
+    # Project Description — often multiline (name + scope); single field for ingest
+    project_desc_clean = (
+        _extract_labeled_multiline(soup, 'Project Description')
+        or get_field('Project Description')
+    )
+    if project_desc_clean:
+        lead['projectDescription'] = project_desc_clean
+        if not (lead.get('description') or '').strip():
+            lead['description'] = project_desc_clean
+
+    # System size — try labeled fields, then project description / CSV description
     system_size = (
         get_field('System Size') or
         get_field('DC System Size') or
@@ -1439,26 +1525,11 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         ''
     )
     if not system_size:
-        # Try parsing from description on the detail page
-        project_desc = get_field('Project Description')
-        system_size = parse_system_size(project_desc)
+        system_size = parse_system_size(project_desc_clean or '')
     if not system_size and lead.get('description'):
         system_size = parse_system_size(lead['description'])
     if system_size:
         lead['systemSize'] = system_size
-
-    # Work Location — site address (Chula Vista: multiline under label)
-    work_loc = _extract_work_location_accela(soup)
-    if work_loc:
-        if owner_fc and (lead.get('siteAddress') or lead.get('address') or '').strip():
-            pass
-        else:
-            lead['siteAddress'] = work_loc
-
-    # Project description — full text
-    project_desc_clean = get_field('Project Description')
-    if project_desc_clean:
-        lead['projectDescription'] = project_desc_clean
 
     # Owner from Contacts tab (San Diego PDS): Contacts → More Details → Owner on Application
     if lead.get('_owner_from_contacts'):
@@ -1510,10 +1581,14 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
                 lead['projectDescription'] = pd2
     else:
         if project_desc_clean:
-            first, last = extract_homeowner_name(project_desc_clean, '')
+            # First line is often the homeowner (e.g. "TIMOTHY ANGLIN" then scope text)
+            first_line = project_desc_clean.split('\n')[0].strip()
+            first, last = extract_homeowner_name(first_line, '')
+            if not first:
+                first, last = extract_homeowner_name(project_desc_clean, '')
             if first and not lead.get('homeownerFirstName'):
                 lead['homeownerFirstName'] = first
-                lead['homeownerLastName']  = last
+                lead['homeownerLastName'] = last
 
         # Application Information fields (non–Contacts-tab portals)
         kwh = get_field('Rounded Kilowatts Total System Size')
