@@ -184,13 +184,14 @@ def _run_campaign_cities_sequential(
 
 @app.route('/')
 def index():
-    from scraper_accela import CITY_CONFIGS
+    # Do not import scraper_accela / Playwright here — Render (and others) often health-check "/".
+    # Loading CITY_CONFIGS pulls every city module + Playwright and can timeout or OOM on deploy.
     return jsonify({
         'status':           'ok',
         'service':          'scrappy',
         'base44_enabled':   BASE44_ENABLED,
-        'available_cities': ['san_diego', 'los_angeles'] + list(CITY_CONFIGS.keys()),
         'campaign_cities':  'GET /campaign/cities — keys + labels for Base44 templates',
+        'health':           'GET /health — use this for load balancer / Render health checks',
         'runscan':          'GET /runscan — multi-city test scan on server (POST /runscan/sync)',
     })
 

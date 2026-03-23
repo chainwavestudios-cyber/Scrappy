@@ -28,12 +28,22 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 RUN playwright install chromium
 
 COPY . .
 
 # Render sets PORT at runtime; local runs can use default.
 # JSON-form CMD cannot expand $PORT — shell form is required.
-CMD gunicorn app:app --bind 0.0.0.0:${PORT:-10000} --timeout 300 --workers 1
+# Logs to stdout/stderr so Render shows boot errors; do not import Playwright on GET / (see app.index).
+CMD gunicorn app:app \
+  --bind 0.0.0.0:${PORT:-10000} \
+  --timeout 300 \
+  --workers 1 \
+  --access-logfile - \
+  --error-logfile - \
+  --capture-output
