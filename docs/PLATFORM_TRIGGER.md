@@ -28,7 +28,7 @@ So: `SCRAPPY_URL=https://scrappy-au2o.onrender.com` (no trailing slash).
 
 \* Provide either **`days`** (rolling lookback) **or** **`startDate` + `endDate`** (custom). If both styles are sent, **custom dates win** when both `startDate` and `endDate` are present.
 
-**Response (immediate):** `202`-style “started” JSON — scrapes run in **background threads**; ingest happens when each city finishes. This is **not** a synchronous list of leads.
+**Response (immediate):** `202`-style “started” JSON — scrapes run in a **background thread**; cities in one request run **one after another**. A **global lock** ensures only **one Playwright scrape** runs at a time per Render worker (overlapping `/scrape/campaign` calls **queue** instead of corrupting each other). Ingest runs after each city completes.
 
 **Auth:** If Render has **`INTERNAL_SECRET`** set, **`POST /scrape/campaign`** requires header **`x-internal-secret`** with the same value (same behavior as **`/runscan/sync`**). In Base44 set **`SCRAPPY_INTERNAL_SECRET`** to match. If **`INTERNAL_SECRET`** is unset on Render, the header is not required (not recommended for production).
 

@@ -9,6 +9,9 @@ from datetime import datetime, timedelta
 
 log = logging.getLogger(__name__)
 
+# One Playwright scrape at a time per worker (concurrent runs corrupt sessions / OOM on Render).
+_PLAYWRIGHT_LOCK = threading.Lock()
+
 app = Flask(__name__)
 app.register_blueprint(backup_bp)
 
@@ -146,19 +149,33 @@ def get_scraper(city: str):
 
 
 def run_and_post(city, start_date, end_date, campaign_id=None, organization_id=None):
-    try:
-        scrape_fn, kwargs = get_scraper(city)
-        leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs) \
-                if kwargs else scrape_fn(start_date, end_date)
-        print(f'Scraped {len(leads)} leads from {city}')
-        post_to_base44(
-            leads, city, start_date, end_date, campaign_id,
-            organization_id=organization_id,
-        )
-        return leads
-    except Exception as e:
-        print(f'Scrape failed [{city}]: {e}')
-        return []
+    with _PLAYWRIGHT_LOCK:
+        try:
+            scrape_fn, kwargs = get_scraper(city)
+            leads = scrape_fn(start_date=start_date, end_date=end_date, **kwargs) \
+                    if kwargs else scrape_fn(start_date, end_date)
+            print(f'Scraped {len(leads)} leads from {city}')
+            post_to_base44(
+                leads, city, start_date, end_date, campaign_id,
+                organization_id=organization_id,
+            )
+            return leads
+        except Exception as e:
+            print(f'Scrape failed [{city}]: {e}')
+            return []
+
+
+def _run_campaign_cities_sequential(
+    cities: list,
+    start_date: str,
+    end_date: str,
+    campaign_id,
+    organization_id,
+):
+    """Background worker: one city after another (avoids N× Playwright per HTTP request)."""
+    for city in cities:
+        run_and_post(city, start_date, end_date, campaign_id, organization_id)
+    log.info(f'Campaign {campaign_id} finished all cities: {cities}')
 
 
 # ---------------------------------------------------------------------------
@@ -231,19 +248,19 @@ def scrape_campaign():
     organization_id = str(_oid).strip() if _oid is not None else ''
     organization_id = organization_id or None
 
-    for city in cities:
-        thread = threading.Thread(
-            target=run_and_post,
-            args=(city, start_date, end_date, campaign_id, organization_id),
-        )
-        thread.daemon = True
-        thread.start()
+    city_list = [str(c) for c in cities]
+    thread = threading.Thread(
+        target=_run_campaign_cities_sequential,
+        args=(city_list, start_date, end_date, campaign_id, organization_id),
+    )
+    thread.daemon = True
+    thread.start()
 
-    log.info(f'Campaign {campaign_id} started: {cities} {start_date} → {end_date}')
+    log.info(f'Campaign {campaign_id} started: {city_list} {start_date} → {end_date}')
     return jsonify({
         'status':          'started',
         'campaignId':      campaign_id,
-        'cities':          cities,
+        'cities':          city_list,
         'startDate':       start_date,
         'endDate':         end_date,
         'days':            days,
