@@ -29,6 +29,7 @@ import argparse
 import asyncio
 import csv
 import json
+import os
 import logging
 import re
 import unicodedata
@@ -552,6 +553,9 @@ def print_summary(results, title: str = "PERMIT PORTAL RECON SUMMARY"):
 
 
 def save_targets_json(cities: list, path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(cities, f, indent=2, ensure_ascii=False)
         f.write("\n")
