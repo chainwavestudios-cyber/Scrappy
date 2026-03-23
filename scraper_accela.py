@@ -103,6 +103,7 @@ import json
 import logging
 import os
 import tempfile
+from urllib.parse import urljoin
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
@@ -789,7 +790,9 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                 )
                 detail_page = await detail_context.new_page()
                 try:
-                    await _get_permit_details(detail_page, base_url, module, permit_num, lead)
+                    await _get_permit_details(
+                        detail_page, base_url, module, permit_num, lead, config,
+                    )
                 except Exception as e:
                     log.error(f'[{city_name}] Detail failed {permit_num}: {e}')
                     _set_defaults(lead)
@@ -797,10 +800,12 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     await detail_page.close()
                     await detail_context.close()
 
+            leads = [l for l in leads if not l.get('_skip_ingest')]
             # Strip internal flags before returning
             for lead in leads:
                 lead.pop("_owner_from_contacts", None)
                 lead.pop("detailHref", None)
+                lead.pop("_skip_ingest", None)
             return leads
 
         finally:
@@ -955,6 +960,11 @@ def _get_field_from_soup(soup, label):
             parts = raw.split(':', 1)
             if len(parts) == 2 and parts[1].strip():
                 return parts[1].strip()
+        # e.g. "Rounded Kilowatts Total System Size:6" (San Diego — label + value same node)
+        if tl.startswith(lbl + ':') or tl.startswith(lbl + ' :'):
+            parts = raw.split(':', 1)
+            if len(parts) == 2 and parts[1].strip():
+                return parts[1].strip()
     return ''
 
 
@@ -1076,6 +1086,126 @@ def _sync_address_zip_for_ingest(lead):
             lead['zipCode'] = zm.group(1)
 
 
+def _resolve_permit_url_from_href(base_url: str, permit_num: str, module: str, lead: dict) -> None:
+    """Prefer the grid row link (real Accela URL); fallback to CapDetail altId."""
+    href = lead.get('detailHref')
+    if href and str(href).strip() and not str(href).lower().startswith('javascript'):
+        h = str(href).strip()
+        if h.startswith('http'):
+            lead['permitUrl'] = h
+        else:
+            base = (base_url or '').rstrip('/')
+            lead['permitUrl'] = urljoin(base + '/', h.lstrip('/'))
+        return
+    lead['permitUrl'] = f'{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}'
+
+
+def _primary_scope_allowed(soup, cfg: dict) -> bool:
+    """
+    When configured (e.g. San Diego residential solar), require Primary Scope text
+    to contain all substrings (e.g. 8002 + Solar Photovoltaic).
+    """
+    reqs = cfg.get('require_primary_scope_contains')
+    if not reqs:
+        return True
+    if isinstance(reqs, str):
+        reqs = [reqs]
+    scope_line = (
+        _get_field_from_soup(soup, 'Primary Scope Code')
+        or _get_field_from_soup(soup, 'Primary Scope')
+        or ''
+    )
+    blob = soup.get_text(' ', strip=True)
+    combined = f'{scope_line} {blob}'.lower()
+    return all(str(r).lower() in combined for r in reqs)
+
+
+def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
+    """
+    San Diego / Accela Contacts tab: Owner on Application — name, address, zip, email.
+    """
+    blob = ''
+    best_len = 0
+    for el in soup2.find_all(['div', 'table', 'td', 'fieldset', 'section', 'tbody']):
+        t = el.get_text(separator='\n', strip=True)
+        tl = t.lower()
+        if 'owner on application' not in tl:
+            continue
+        if '@' in t or 'e-mail' in tl or 'email' in tl:
+            if len(t) > best_len:
+                blob = t
+                best_len = len(t)
+    if not blob:
+        for el in soup2.find_all(string=re.compile(r'owner\s+on\s+application', re.I)):
+            p = el.find_parent(['div', 'table', 'td', 'tr'])
+            if p:
+                t = p.get_text(separator='\n', strip=True)
+                if len(t) > 30:
+                    blob = t
+                    break
+    if not blob:
+        return
+
+    lead['ownerOnApplication'] = re.sub(r'\s+', ' ', blob.replace('\n', ' | ')).strip()
+
+    em = re.search(
+        r'E-?mail\s*:?\s*([\w.\-+]+@[\w.\-]+\.[a-zA-Z]{2,})',
+        blob,
+        re.I,
+    )
+    if em:
+        lead['homeownerEmail'] = em.group(1).strip()
+
+    zm = re.search(r'\b(\d{5})(?:-\d{4})?\b', blob)
+    if zm:
+        lead['zipCode'] = zm.group(1)
+
+    addr_line = None
+    for line in blob.split('\n'):
+        ln = line.strip()
+        if not ln:
+            continue
+        if re.search(r'\b(CA|California)\b', ln, re.I) and re.search(r'\d{5}', ln):
+            addr_line = re.sub(r'\s+', ' ', ln)
+            break
+        if re.search(r'\b(ST|AVE|RD|DR|LN|CT|WAY|BLVD|CIR)\b', ln, re.I) and re.search(r'\d', ln):
+            addr_line = re.sub(r'\s+', ' ', ln)
+
+    if addr_line:
+        lead['siteAddress'] = addr_line
+        lead['address'] = addr_line
+
+    lines = [x.strip() for x in blob.split('\n') if x.strip()]
+    name_line = None
+    for i, ln in enumerate(lines):
+        if 'owner on application' in ln.lower():
+            for j in range(i + 1, min(i + 5, len(lines))):
+                cand = lines[j]
+                if '@' in cand or re.search(r'\d{5}', cand):
+                    continue
+                if re.search(r'\b(st|ave|rd|dr|ln|ct|way|blvd|cir|hwy)\b', cand, re.I):
+                    continue
+                parts = cand.split()
+                if len(parts) >= 2 and len(cand) < 120:
+                    name_line = cand
+                    break
+            break
+    if not name_line:
+        for ln in lines:
+            if '@' in ln or re.search(r'\d{5}', ln):
+                continue
+            if re.search(r'\b(st|ave|rd|dr|ln|ct|way|blvd|cir)\b', ln, re.I):
+                continue
+            parts = ln.split()
+            if len(parts) >= 2 and len(ln) < 100 and re.match(r'^[A-Za-z]', ln):
+                name_line = ln
+                break
+    if name_line:
+        parts = name_line.split()
+        lead['homeownerFirstName'] = parts[0]
+        lead['homeownerLastName'] = ' '.join(parts[1:]) if len(parts) > 1 else ''
+
+
 async def _expand_accela_detail_sections(detail_page):
     """Expand More Details → Additional Information → Application Information."""
     await detail_page.evaluate("""
@@ -1102,6 +1232,15 @@ async def _expand_accela_detail_sections(detail_page):
         }
     """)
     await detail_page.wait_for_timeout(1500)
+    # San Diego: Primary Scope / kW / ESS often under Application Details
+    await detail_page.evaluate("""
+        () => {
+            const els = Array.from(document.querySelectorAll('a, span, button'));
+            const ad = els.find(l => l.textContent.trim() === 'Application Details');
+            if (ad) ad.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(1500)
 
 
 async def _click_record_details_tab(detail_page):
@@ -1120,9 +1259,10 @@ async def _click_record_details_tab(detail_page):
     await detail_page.wait_for_timeout(2000)
 
 
-async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
-    detail_url = f"{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}"
-    lead['permitUrl'] = detail_url
+async def _get_permit_details(detail_page, base_url, module, permit_num, lead, config=None):
+    cfg = config or {}
+    _resolve_permit_url_from_href(base_url, permit_num, module, lead)
+    detail_url = lead['permitUrl']
     log.info(f'  → {detail_url}')
 
     # domcontentloaded is faster and more reliable than networkidle — avoids timeouts
@@ -1133,6 +1273,11 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
 
     html = await detail_page.content()
     soup = BeautifulSoup(html, 'lxml')
+
+    if cfg.get('require_primary_scope_contains') and not _primary_scope_allowed(soup, cfg):
+        lead['_skip_ingest'] = True
+        log.info(f'  skip (primary scope): {permit_num}')
+        return
 
     def get_field(label):
         return _get_field_from_soup(soup, label)
@@ -1261,29 +1406,7 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
         await detail_page.wait_for_timeout(1500)
         html2 = await detail_page.content()
         soup2 = BeautifulSoup(html2, 'lxml')
-        owner_block = ''
-        for el in soup2.find_all(['span', 'td', 'div', 'th', 'h2', 'h3', 'strong']):
-            if 'owner on application' in el.get_text(strip=True).lower():
-                container = el.find_parent(['div', 'table', 'section', 'fieldset', 'tr'])
-                if container:
-                    parts = []
-                    for sib in container.find_next_siblings():
-                        t = sib.get_text(separator=' ', strip=True)
-                        if t:
-                            parts.append(t)
-                        if sib.find(['h2', 'h3', 'strong']) and len(parts) > 1:
-                            break
-                    if parts:
-                        flat = [p.strip() for p in parts if p.strip()]
-                        owner_block = ' | '.join(list(dict.fromkeys(flat))[:5])
-                        break
-        if owner_block:
-            lead['ownerOnApplication'] = owner_block
-            name_part = owner_block.split('|')[0].strip()
-            name_words = name_part.split()
-            if len(name_words) >= 2:
-                lead['homeownerFirstName'] = name_words[0]
-                lead['homeownerLastName']  = ' '.join(name_words[1:])
+        _parse_owner_contacts_soup(soup2, lead)
 
         # Contacts tab swaps the DOM — old soup is stale. Return to record view,
         # re-open Application Information, then read kW / Electrical / ESS (etc.).
@@ -1355,7 +1478,7 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
 def _set_defaults(lead):
     for field in ['jobValue', 'subType', 'occupancyType', 'numberOfPanels',
                   'licensedProfessional', 'systemSize', 'projectDescription',
-                  'ownerOnApplication', 'electricalServiceUpgrade',
+                  'ownerOnApplication', 'homeownerEmail', 'electricalServiceUpgrade',
                   'advancedEnergyStorage', 'crossStreet', 'descriptionOfWork',
                   'numberOfBuildings', 'housingUnits', 'address']:
         lead.setdefault(field, '')
