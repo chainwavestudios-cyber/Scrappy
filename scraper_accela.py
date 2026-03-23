@@ -103,7 +103,7 @@ import json
 import logging
 import os
 import tempfile
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
@@ -850,13 +850,21 @@ async def _scrape_rows(page, source, base_url, module, config=None):
             col_status       = cfg.get('col_status',       6)
             col_address      = cfg.get('col_address',      9)
 
-            link = row.find('a')
-            href = link['href'] if link else None
-            link_text = link.get_text(strip=True) if link else ''
-
             col_permit_num = cfg.get('col_permit_num', None)
+            link = None
+            href = None
+            link_text = ''
+            if isinstance(col_permit_num, int) and len(cells) > col_permit_num:
+                link = cells[col_permit_num].find('a', href=True)
+            if link is None:
+                link = row.find('a', href=True)
+            if link is not None:
+                href = link.get('href')
+                link_text = (link.get_text(strip=True) or '').strip()
+
             if col_permit_num is not None:
-                permit_num = raw_cells[col_permit_num] if len(raw_cells) > col_permit_num else ''
+                cell_txt = raw_cells[col_permit_num] if len(raw_cells) > col_permit_num else ''
+                permit_num = (link_text or cell_txt).strip()
             else:
                 permit_num = link_text if link_text else (raw_cells[2] if len(raw_cells) > 2 else '')
 
@@ -873,7 +881,10 @@ async def _scrape_rows(page, source, base_url, module, config=None):
             project_name = raw_cells[col_project_name] if col_project_name is not None and len(raw_cells) > col_project_name else ''
 
             raw_address = raw_cells[col_address] if len(raw_cells) > col_address else ''
-            address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
+            if cfg.get('skip_address_apn_strip'):
+                address = raw_address.strip()
+            else:
+                address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
 
             zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', address)
             zip_code = zip_match.group(1) if zip_match else ''
@@ -899,6 +910,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 'numberOfPanels':       '',
                 'jobValue':             '',
                 'status':               status,
+                'recordStatus':         status,
                 'subType':              '',
                 'occupancyType':        '',
                 'licensedProfessional': '',
@@ -1102,9 +1114,25 @@ def _resolve_permit_url_from_href(base_url: str, permit_num: str, module: str, l
         h = str(href).strip()
         if h.startswith('http'):
             lead['permitUrl'] = h
+            return
+        bu = (base_url or '').strip()
+        parsed = urlparse(bu)
+        origin = f'{parsed.scheme}://{parsed.netloc}' if parsed.scheme else ''
+        path_segs = [s for s in (parsed.path or '').split('/') if s]
+        agency = path_segs[-1] if path_segs else ''
+        if h.startswith('/'):
+            if origin:
+                lead['permitUrl'] = urljoin(origin, h)
+            else:
+                lead['permitUrl'] = urljoin(bu.rstrip('/') + '/', h.lstrip('/'))
+            return
+        h_rel = h.lstrip('/')
+        # Accela often returns "AGENCY/Cap/..." while base_url is already .../AGENCY — avoid /AGENCY/AGENCY/
+        if origin and agency and h_rel.upper().startswith(agency.upper() + '/'):
+            lead['permitUrl'] = urljoin(origin + '/', h_rel)
         else:
-            base = (base_url or '').rstrip('/')
-            lead['permitUrl'] = urljoin(base + '/', h.lstrip('/'))
+            base = bu.rstrip('/')
+            lead['permitUrl'] = urljoin(base + '/', h_rel)
         return
     lead['permitUrl'] = f'{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}'
 
@@ -1522,7 +1550,7 @@ def _set_defaults(lead):
                   'ownerOnApplication', 'homeownerEmail', 'homeownerPhone',
                   'ownerMailingAddress', 'electricalServiceUpgrade',
                   'advancedEnergyStorage', 'crossStreet', 'descriptionOfWork',
-                  'numberOfBuildings', 'housingUnits', 'address']:
+                  'numberOfBuildings', 'housingUnits', 'address', 'recordStatus']:
         lead.setdefault(field, '')
 
 

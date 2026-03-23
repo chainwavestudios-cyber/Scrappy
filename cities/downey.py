@@ -1,7 +1,8 @@
 """Downey — Accela Citizen Access (Building).
 
-Search: Permit type *Residential Solar*, date range. All useful fields are on the
-result grid; the record detail view does not add solar-specific fields.
+General search: permit type *Residential Solar* + date range. All data comes from
+the results grid only (no CSV export, no detail pages). Column 0 is the row
+checkbox/lead-in; real fields start at index 1.
 """
 
 CONFIGS = {
@@ -19,14 +20,18 @@ CONFIGS = {
         'source':      'downey_accela',
         'lead_category': 'residential',
         'skip_solar_description_filter': True,
+        # Grid only — no export, no CapDetail navigation
+        'skip_csv_download': True,
         'skip_detail_fetch': True,
-        # Columns: Date | Permit Number | Permit Type | Description | Address | Record Status | Action
-        'col_date':          0,
-        'col_permit_num':    1,
-        'col_permit_type':   2,
-        'col_description':   3,
-        'col_address':       4,
-        'col_status':        5,
+        # Keep full address line (do not strip trailing digits / APN tail heuristic)
+        'skip_address_apn_strip': True,
+        # td indices: [0]=select, 1=Date, 2=Permit# (link), 3=Type, 4=Description, 5=Address, 6=Status, 7+=Action
+        'col_date':          1,
+        'col_permit_num':    2,
+        'col_permit_type':   3,
+        'col_description':   4,
+        'col_address':       5,
+        'col_status':        6,
         'col_project_name':  None,
     },
 }
