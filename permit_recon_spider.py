@@ -230,6 +230,27 @@ BROAD_FIELD_PATTERNS = [
     "select[name*='type' i]", "input[id*='worktype' i]",
 ]
 
+# Permit / record type dropdown (Accela & similar) — required for “broad” solar date-range scrapes
+RECORD_TYPE_SELECT_PATTERNS = [
+    "select[id*='ddlGSPermitType']",
+    "select[id*='selGSPermitType']",
+    "select[id*='PermitType']",
+    "select[id*='RecordType']",
+    "select[id*='ddlSearchType']",
+    "select[name*='PermitType']",
+    "select[id*='GeneralSearch']",
+]
+
+# Typical “lookup only” portals (permit # / record id)
+PERMIT_NUMBER_FIELD_PATTERNS = [
+    "input[id*='PermitNumber']",
+    "input[id*='txtGSPermit']",
+    "input[id*='PermitNo']",
+    "input[name*='PermitNumber']",
+    "input[id*='RecordNumber']",
+    "input[id*='altId']",
+]
+
 
 # ---------------------------------------------------------------------------
 # Data structures
@@ -266,6 +287,16 @@ class ReconResult:
     date_range_available: bool = False
     address_required: bool = False
     has_permit_type_filter: bool = False
+    # --- Explicit search UX (for filtering “broad” vs lookup-only portals) ---
+    has_record_type_select: bool = False
+    has_permit_number_field: bool = False
+    has_address_field: bool = False
+    # broad_type_and_date: date + record/permit type select (best for bulk solar scrapes)
+    broad_type_and_date: bool = False
+    # lookup_only_portal: permit # / address style, no date window
+    lookup_only_portal: bool = False
+    # search_mode: BROAD_TYPE_AND_DATE | DATE_NO_RECORD_TYPE_SELECT | LOOKUP_ONLY | NO_DATE | UNKNOWN | ERROR
+    search_mode: str = ""
     search_page_url: str = ""
     iframe_detected: bool = False
     iframe_selector: str = ""
@@ -304,8 +335,8 @@ class PermitReconSpider:
                 await context.close()
                 results.append(result)
                 log.info(
-                    f"    Result: {result.tier} | Date Range: {result.date_range_available} | "
-                    f"Broad: {result.broad_search_possible}"
+                    f"    Result: {result.tier} | mode={result.search_mode} | "
+                    f"type+date={result.broad_type_and_date} | lookup_only={result.lookup_only_portal}"
                 )
                 if delay_sec > 0:
                     await asyncio.sleep(delay_sec)
@@ -346,10 +377,11 @@ class PermitReconSpider:
             active_frame = await self._detect_and_enter_iframe(page, search_context, result, log_step)
             await self._handle_submenus(active_frame, result, log_step)
             await self._analyze_form(active_frame, result, log_step)
-            self._classify(result)
+            self._classify_portal(result)
 
         except Exception as e:
             result.tier = "ERROR"
+            result.search_mode = "ERROR"
             result.error = str(e)
             log.error(f"    ERROR on {config['city']}: {e}")
         finally:
@@ -466,6 +498,14 @@ class PermitReconSpider:
         if not result.date_range_available:
             log_step("detect", "date range field", "various", False, "No date field found")
 
+        for selector in RECORD_TYPE_SELECT_PATTERNS:
+            found, detail = await field_exists(selector)
+            if found:
+                result.has_record_type_select = True
+                result.form_fields.append(asdict(FormField("record_type_select", selector, detail, False)))
+                log_step("detect", "record/permit type select", selector, True, detail)
+                break
+
         for selector in BROAD_FIELD_PATTERNS:
             found, detail = await field_exists(selector)
             if found:
@@ -477,11 +517,20 @@ class PermitReconSpider:
         for selector in ADDRESS_FIELD_PATTERNS:
             found, detail = await field_exists(selector)
             if found:
+                result.has_address_field = True
                 required = "required=True" in detail
                 result.address_required = required
                 result.form_fields.append(asdict(FormField("address", selector, detail, required)))
                 log_step("detect", "address field", selector, True,
                          f"{detail} | required={required}")
+                break
+
+        for selector in PERMIT_NUMBER_FIELD_PATTERNS:
+            found, detail = await field_exists(selector)
+            if found:
+                result.has_permit_number_field = True
+                result.form_fields.append(asdict(FormField("permit_number", selector, detail, False)))
+                log_step("detect", "permit / record number field", selector, True, detail)
                 break
 
         try:
@@ -491,16 +540,63 @@ class PermitReconSpider:
         except Exception:
             pass
 
-    def _classify(self, result):
-        if result.date_range_available and (result.has_permit_type_filter or not result.address_required):
+    def _classify_portal(self, result):
+        """
+        Classify portal for bulk solar scraping:
+        - Ideal: date range + record/permit type select (filter solar permit type + date window).
+        - Poor: only permit # and/or address, no dates — not suitable for runscan-style scrapes.
+        """
+        if result.error or result.tier == "ERROR":
+            result.search_mode = "ERROR"
+            return
+
+        d = result.date_range_available
+        rt = result.has_record_type_select
+        pn = result.has_permit_number_field
+        ad = result.has_address_field
+
+        result.broad_type_and_date = bool(d and rt)
+        result.lookup_only_portal = bool(not d and (pn or ad))
+
+        if d and rt:
+            result.search_mode = "BROAD_TYPE_AND_DATE"
             result.tier = "TIER1_BROAD"
             result.broad_search_possible = True
-        elif result.date_range_available and result.address_required:
+            result.notes = "Date range + record/permit type select — suitable for broad Accela scrapes."
+            return
+
+        if d and not rt:
+            result.search_mode = "DATE_NO_RECORD_TYPE_SELECT"
             result.tier = "TIER2_PARTIAL"
-        elif not result.date_range_available:
+            # Some portals allow date-only general search (all types); still weaker than explicit type.
+            result.broad_search_possible = not result.address_required
+            result.notes = (
+                "Date fields found but no permit/record type dropdown matched — "
+                "verify if empty type = all records or if portal is lookup-heavy."
+            )
+            return
+
+        if not d and (pn or ad):
+            result.search_mode = "LOOKUP_ONLY"
             result.tier = "TIER3_LOCKED"
-        else:
-            result.tier = "UNKNOWN"
+            result.broad_search_possible = False
+            result.lookup_only_portal = True
+            result.notes = (
+                "No date range on search form; permit # and/or address fields — "
+                "not suitable for bulk date-range solar scrapes."
+            )
+            return
+
+        if not d:
+            result.search_mode = "NO_DATE"
+            result.tier = "TIER3_LOCKED"
+            result.broad_search_possible = False
+            result.notes = "No date inputs detected on this surface — treat as locked or wrong page."
+            return
+
+        result.search_mode = "UNKNOWN"
+        result.tier = "UNKNOWN"
+        result.notes = "Could not classify — manual review."
 
 
 # ---------------------------------------------------------------------------
@@ -515,8 +611,11 @@ def save_results(results, json_path, csv_path):
     with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
             "census_rank", "population", "city", "state", "platform", "tier",
-            "broad_search_possible", "date_range_available", "address_required",
-            "has_permit_type_filter", "iframe_detected", "search_page_url", "error", "url",
+            "search_mode", "broad_type_and_date", "lookup_only_portal",
+            "broad_search_possible", "date_range_available",
+            "has_record_type_select", "has_permit_number_field", "has_address_field",
+            "address_required", "has_permit_type_filter",
+            "iframe_detected", "search_page_url", "notes", "error", "url",
         ])
         writer.writeheader()
         for r in results:
@@ -524,12 +623,20 @@ def save_results(results, json_path, csv_path):
                 "census_rank": r.census_rank,
                 "population": r.population,
                 "city": r.city, "state": r.state, "platform": r.platform,
-                "tier": r.tier, "broad_search_possible": r.broad_search_possible,
+                "tier": r.tier,
+                "search_mode": r.search_mode,
+                "broad_type_and_date": r.broad_type_and_date,
+                "lookup_only_portal": r.lookup_only_portal,
+                "broad_search_possible": r.broad_search_possible,
                 "date_range_available": r.date_range_available,
+                "has_record_type_select": r.has_record_type_select,
+                "has_permit_number_field": r.has_permit_number_field,
+                "has_address_field": r.has_address_field,
                 "address_required": r.address_required,
                 "has_permit_type_filter": r.has_permit_type_filter,
                 "iframe_detected": r.iframe_detected,
                 "search_page_url": r.search_page_url,
+                "notes": r.notes,
                 "error": r.error, "url": r.url,
             })
     log.info(f"Saved summary CSV → {csv_path}")
@@ -540,15 +647,23 @@ def print_summary(results, title: str = "PERMIT PORTAL RECON SUMMARY"):
     print(f"{title} — {len(results)} jurisdictions")
     print("=" * 70)
     tier_counts = {}
+    mode_counts = {}
     for r in results:
         tier_counts[r.tier] = tier_counts.get(r.tier, 0) + 1
+        m = r.search_mode or "UNKNOWN"
+        mode_counts[m] = mode_counts.get(m, 0) + 1
         icon = {"TIER1_BROAD": "✅", "TIER2_PARTIAL": "🟡",
                 "TIER3_LOCKED": "❌", "ERROR": "💥"}.get(r.tier, "❓")
         pop = f" pop={r.population}" if r.population else ""
-        print(f"{icon} {r.city}, {r.state} ({r.platform}){pop} → {r.tier}")
+        sm = f" [{r.search_mode}]" if r.search_mode else ""
+        print(f"{icon} {r.city}, {r.state} ({r.platform}){pop} → {r.tier}{sm}")
     print("-" * 70)
+    print("By tier:")
     for tier, count in sorted(tier_counts.items()):
         print(f"  {tier}: {count}")
+    print("By search_mode (filter CSV on broad_type_and_date=true for ideal portals):")
+    for mode, count in sorted(mode_counts.items(), key=lambda x: (-x[1], x[0])):
+        print(f"  {mode}: {count}")
     print("=" * 70 + "\n")
 
 
