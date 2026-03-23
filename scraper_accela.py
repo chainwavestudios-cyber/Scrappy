@@ -355,6 +355,7 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                 'permitUrl':            f'{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}' if permit_num else '',
                 'date':                 permit_date_str,
                 'siteAddress':          address,
+                'address':              address,
                 'zipCode':              zip_code,
                 'city':                 cfg.get('name', ''),
                 'description':          description,
@@ -876,6 +877,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 'permitUrl':            f'{base_url}/Cap/CapDetail.aspx?altId={permit_num}&module={module}' if permit_num else '',
                 'date':                 permit_date_str,
                 'siteAddress':          address,
+                'address':              address,
                 'zipCode':              zip_code,
                 'city':                 cfg.get('name', ''),
                 'description':          description,
@@ -936,7 +938,9 @@ def _get_field_from_soup(soup, label):
     """Label/value pairs on Accela detail HTML (table or sibling layout)."""
     lbl = label.lower().rstrip(':')
     for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
-        if el.get_text(strip=True).lower().rstrip(':') == lbl:
+        raw = el.get_text(strip=True)
+        tl = raw.lower().rstrip(':')
+        if tl == lbl:
             nxt = el.find_next_sibling()
             if nxt and nxt.get_text(strip=True):
                 return nxt.get_text(strip=True)
@@ -945,7 +949,131 @@ def _get_field_from_soup(soup, label):
                 nxt2 = parent.find_next_sibling()
                 if nxt2 and nxt2.get_text(strip=True):
                     return nxt2.get_text(separator=' ', strip=True)
+            continue
+        # e.g. "Job Value($): $9,000.00" in one element (Chula Vista)
+        if lbl in ('job value($)', 'job value') and 'job value' in tl and ':' in raw:
+            parts = raw.split(':', 1)
+            if len(parts) == 2 and parts[1].strip():
+                return parts[1].strip()
     return ''
+
+
+def _extract_work_location_accela(soup):
+    """
+    Chula Vista / Accela often put site address under 'Work Location' as:
+    - multiline in one cell, or
+    - label row + next table row, or
+    - label + adjacent td (same row).
+    """
+    w = _get_field_from_soup(soup, 'Work Location')
+    if w:
+        return w
+
+    for el in soup.find_all(['td', 'div', 'span']):
+        txt = el.get_text(separator='\n', strip=True)
+        if not txt:
+            continue
+        first = txt.split('\n')[0].strip().lower().rstrip(':')
+        if first == 'work location' and '\n' in txt:
+            lines = [ln.strip() for ln in txt.split('\n') if ln.strip()]
+            if len(lines) >= 2:
+                return '\n'.join(lines[1:])
+
+    for el in soup.find_all(['span', 'td', 'div', 'th', 'label', 'strong']):
+        raw = el.get_text(strip=True)
+        low = raw.lower().rstrip(':').strip()
+        if low != 'work location':
+            continue
+        nxt = el.find_next_sibling()
+        if nxt and getattr(nxt, 'get_text', None):
+            val = nxt.get_text(separator=' ', strip=True)
+            if val:
+                return val
+        tr = el.find_parent('tr')
+        if tr:
+            ntr = tr.find_next_sibling('tr')
+            if ntr:
+                val = ntr.get_text(separator=' ', strip=True)
+                if val:
+                    return val
+            tds = tr.find_all('td')
+            for i, td in enumerate(tds):
+                if 'work location' in td.get_text().lower() and i + 1 < len(tds):
+                    val2 = tds[i + 1].get_text(separator=' ', strip=True)
+                    if val2 and 'work location' not in val2.lower():
+                        return val2
+        par = el.find_parent('div')
+        if par:
+            for sib in el.find_next_siblings():
+                if getattr(sib, 'get_text', None):
+                    val = sib.get_text(separator=' ', strip=True)
+                    if val:
+                        return val
+    return ''
+
+
+def _extract_job_value_accela(soup):
+    """
+    Prefer 'Job Value($)' / 'Job Value' under Additional Information (Chula Vista).
+    Fall back to empty so caller can try legacy 'Valuation' parsing.
+    """
+    for lbl in ('Job Value($)', 'Job Value', 'Valuation'):
+        v = _get_field_from_soup(soup, lbl)
+        if v and len(v) < 200:
+            return v
+
+    for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
+        t = el.get_text(strip=True)
+        tl = t.lower()
+        if 'job value' not in tl or len(t) > 60:
+            continue
+        if ':' in t:
+            parts = t.split(':', 1)
+            if len(parts) == 2 and parts[1].strip():
+                return parts[1].strip()
+        nxt = el.find_next_sibling()
+        if nxt and getattr(nxt, 'get_text', None):
+            val = nxt.get_text(strip=True)
+            if val:
+                return val
+        tr = el.find_parent('tr')
+        if tr:
+            ntr = tr.find_next_sibling('tr')
+            if ntr:
+                val = ntr.get_text(separator=' ', strip=True)
+                if val:
+                    return val
+            tds = tr.find_all('td')
+            for i, td in enumerate(tds):
+                if 'job value' in td.get_text().lower() and i + 1 < len(tds):
+                    val2 = tds[i + 1].get_text(strip=True)
+                    if val2:
+                        return val2
+
+    blob = soup.get_text(' ', strip=True)
+    m = re.search(
+        r'Job Value\s*\(\s*\$\s*\)\s*:?\s*(\$?\s*[\d,]+\.?\d*)',
+        blob,
+        re.I,
+    )
+    if m:
+        return re.sub(r'\s+', '', m.group(1))
+    return ''
+
+
+def _sync_address_zip_for_ingest(lead):
+    """Base44 SolarPermit uses `address` + `zipCode`; keep `siteAddress` in sync."""
+    loc = (lead.get('siteAddress') or lead.get('address') or '').strip()
+    if not loc:
+        return
+    single = re.sub(r'\s+', ' ', loc.replace('\n', ' ')).strip()
+    lead['siteAddress'] = single
+    lead['address'] = single
+    zm = re.search(r'\b(\d{5})(?:-\d{4})?\b', single)
+    if zm:
+        z = lead.get('zipCode') or ''
+        if not (str(z).strip()):
+            lead['zipCode'] = zm.group(1)
 
 
 async def _expand_accela_detail_sections(detail_page):
@@ -1010,23 +1138,25 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
         return _get_field_from_soup(soup, label)
 
     # ---------------------------------------------------------------------------
-    # Job Value — Valuation field under Application Information
+    # Job Value — Chula Vista: "Job Value($)" under Additional Information;
+    # other portals: "Valuation" etc.
     # ---------------------------------------------------------------------------
-    job_value = ''
-    for el in soup.find_all(string=lambda t: t and 'valuation' in t.lower()):
-        parent = el.parent
-        if not parent:
-            continue
-        for sibling in parent.next_siblings:
-            text = sibling.get_text(strip=True) if hasattr(sibling, 'get_text') else str(sibling).strip()
-            if text and text.replace(',', '').replace('.', '').replace('$', '').strip().isdigit():
-                job_value = text
+    job_value = _extract_job_value_accela(soup)
+    if not job_value:
+        for el in soup.find_all(string=lambda t: t and 'valuation' in t.lower()):
+            parent = el.parent
+            if not parent:
+                continue
+            for sibling in parent.next_siblings:
+                text = sibling.get_text(strip=True) if hasattr(sibling, 'get_text') else str(sibling).strip()
+                if text and text.replace(',', '').replace('.', '').replace('$', '').strip().isdigit():
+                    job_value = text
+                    break
+                elif text and text not in ('', 'Valuation:', 'Valuation'):
+                    job_value = text
+                    break
+            if job_value:
                 break
-            elif text and text not in ('', 'Valuation:', 'Valuation'):
-                job_value = text
-                break
-        if job_value:
-            break
 
     if not job_value:
         for el in soup.find_all(['span', 'td', 'div', 'label', 'th']):
@@ -1109,16 +1239,8 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
     if system_size:
         lead['systemSize'] = system_size
 
-    # Work Location — actual site address from detail page
-    work_loc = ''
-    for el in soup.find_all(['span', 'td', 'div', 'th']):
-        if 'work location' in el.get_text().lower():
-            parent = el.find_parent(['tr', 'div', 'section', 'table'])
-            if parent:
-                nxt = parent.find_next_sibling()
-                if nxt:
-                    work_loc = nxt.get_text(separator=' ', strip=True)
-                    break
+    # Work Location — site address (Chula Vista: multiline under label)
+    work_loc = _extract_work_location_accela(soup)
     if work_loc:
         lead['siteAddress'] = work_loc
 
@@ -1221,6 +1343,8 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead):
         if hu:
             lead['housingUnits'] = hu
 
+    _sync_address_zip_for_ingest(lead)
+
     log.info(
         f'  jobValue={lead.get("jobValue","?")} | size={lead.get("systemSize","?")} | '
         f'elec={lead.get("electricalServiceUpgrade","?")} | ess={lead.get("advancedEnergyStorage","?")} | '
@@ -1233,7 +1357,7 @@ def _set_defaults(lead):
                   'licensedProfessional', 'systemSize', 'projectDescription',
                   'ownerOnApplication', 'electricalServiceUpgrade',
                   'advancedEnergyStorage', 'crossStreet', 'descriptionOfWork',
-                  'numberOfBuildings', 'housingUnits']:
+                  'numberOfBuildings', 'housingUnits', 'address']:
         lead.setdefault(field, '')
 
 
