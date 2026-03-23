@@ -4,3 +4,10 @@ __pycache__/
 .env
 .venv/
 venv/
+
+# macOS
+.DS_Store
+
+# Local scan / scrape dumps (not used at runtime)
+scanoutput*
+*_5d.json
