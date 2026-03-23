@@ -34,4 +34,6 @@ RUN playwright install chromium
 
 COPY . .
 
-CMD ["gunicorn", "app:app", "--bind", "0.0.0.0:10000", "--timeout", "300", "--workers", "1"]
+# Render sets PORT at runtime; local runs can use default.
+# JSON-form CMD cannot expand $PORT — shell form is required.
+CMD gunicorn app:app --bind 0.0.0.0:${PORT:-10000} --timeout 300 --workers 1
