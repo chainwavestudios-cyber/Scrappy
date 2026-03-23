@@ -37,13 +37,8 @@ RUN playwright install chromium
 
 COPY . .
 
-# Render sets PORT at runtime; local runs can use default.
-# JSON-form CMD cannot expand $PORT — shell form is required.
-# Logs to stdout/stderr so Render shows boot errors; do not import Playwright on GET / (see app.index).
-CMD gunicorn app:app \
-  --bind 0.0.0.0:${PORT:-10000} \
-  --timeout 300 \
-  --workers 1 \
-  --access-logfile - \
-  --error-logfile - \
-  --capture-output
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Exec-form CMD + entrypoint: reliable PORT expansion on Render (avoids flaky multi-line shell CMD).
+# In Render UI: Health Check Path = /health
+CMD ["/bin/sh", "/app/docker-entrypoint.sh"]
