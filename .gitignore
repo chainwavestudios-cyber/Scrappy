@@ -11,3 +11,4 @@ venv/
 # Local scan / scrape dumps (not used at runtime)
 scanoutput*
 *_5d.json
+output/
