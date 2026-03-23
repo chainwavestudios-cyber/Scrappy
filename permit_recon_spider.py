@@ -6,31 +6,48 @@ and log the exact navigation path for later use in production scrapers.
 
 Usage:
     python permit_recon_spider.py
+        → ~50 curated seeds with known portal URLs
+
+    python permit_recon_spider.py --census 250
+        → top 250 CA places (2020 Census P1); merges seed URLs; others use guessed Accela slug
+
+    python permit_recon_spider.py --census 250 --no-cdp
+        → exclude CDPs (cities + towns only; fewer than 250 rows)
+
+    python permit_recon_spider.py --census 250 --list-only
+        → write permit_recon_targets.json only (no browser)
+
+    python permit_recon_spider.py --census 250 --offset 0 --max 25 --delay 2
+        → batch recon with pause between cities
 
 Output:
-    permit_recon_results.json  — classification + full navigation log per city
-    permit_recon_results.csv   — summary table
+    permit_recon_results.json / .csv  — recon output
+    permit_recon_targets.json         — resolved target list (--census or --write-targets)
 """
 
+import argparse
 import asyncio
-import json
 import csv
-import re
+import json
 import logging
+import re
+import unicodedata
+import urllib.request
 from datetime import datetime
 from dataclasses import dataclass, field, asdict
 from typing import Optional
-from playwright.async_api import async_playwright, Page, Frame, Locator
+
+from playwright.async_api import async_playwright
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Top 50 California cities with known or likely portal URLs
+# Curated seeds — merged by city name into wider Census-driven runs
 # ---------------------------------------------------------------------------
 
-CITIES = [
+SEED_CITIES = [
     {"city": "Los Angeles",     "state": "CA", "url": "https://ladbsservices2.lacity.org/OnlineServices/", "platform": "Custom"},
     {"city": "San Diego",       "state": "CA", "url": "https://aca-prod.accela.com/SANDIEGO/Cap/CapHome.aspx?module=Building", "platform": "Accela"},
     {"city": "San Jose",        "state": "CA", "url": "https://permits.sanjoseca.gov/search/", "platform": "Custom"},
@@ -82,6 +99,104 @@ CITIES = [
     {"city": "El Monte",        "state": "CA", "url": "https://aca-prod.accela.com/ELMONTE/Cap/CapHome.aspx?module=Building", "platform": "Accela"},
     {"city": "Downey",          "state": "CA", "url": "https://aca-prod.accela.com/DOWNEY/Cap/CapHome.aspx?module=Building", "platform": "Accela"},
 ]
+
+CITIES = SEED_CITIES
+
+CENSUS_PLACES_URL = (
+    "https://api.census.gov/data/2020/dec/pl?get=NAME,P1_001N&for=place:*&in=state:06"
+)
+
+
+def _normalize_city_key(name: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+
+
+def _census_display_name(census_name: str) -> str:
+    s = (census_name or "").replace(", California", "").strip()
+    for suf in (" CDP", " cdp", " city", " town"):
+        if s.lower().endswith(suf):
+            s = s[: -len(suf)].strip()
+    return s
+
+
+def _accela_guess_slug(display_name: str) -> str:
+    nf = unicodedata.normalize("NFKD", display_name)
+    ascii_name = "".join(c for c in nf if not unicodedata.combining(c))
+    return re.sub(r"[^A-Za-z0-9]", "", ascii_name).upper()
+
+
+def _seed_override_by_city() -> dict[str, dict]:
+    return {_normalize_city_key(c["city"]): dict(c) for c in SEED_CITIES}
+
+
+def fetch_census_ca_places(limit: int = 250, *, exclude_cdp: bool = True) -> list[dict]:
+    """2020 Census total population for CA places; sorted by population descending."""
+    req = urllib.request.Request(
+        CENSUS_PLACES_URL,
+        headers={"User-Agent": "permit-recon-spider/1.0 (data.census.gov)"},
+    )
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        raw = json.loads(resp.read().decode())
+    if not raw or len(raw) < 2:
+        return []
+
+    rows = []
+    for row in raw[1:]:
+        name, pop_s = row[0], row[1]
+        if exclude_cdp and "CDP" in name.upper():
+            continue
+        try:
+            pop = int(pop_s)
+        except ValueError:
+            continue
+        display = _census_display_name(name)
+        if not display:
+            continue
+        rows.append({"census_name": name, "city": display, "population": pop})
+
+    rows.sort(key=lambda r: r["population"], reverse=True)
+    out = rows[:limit]
+    for i, r in enumerate(out, start=1):
+        r["rank"] = i
+    return out
+
+
+def build_recon_city_configs(
+    limit: int = 250,
+    *,
+    exclude_cdp: bool = True,
+    offset: int = 0,
+    max_cities: Optional[int] = None,
+) -> list[dict]:
+    places = fetch_census_ca_places(limit, exclude_cdp=exclude_cdp)
+    overrides = _seed_override_by_city()
+    built = []
+    for p in places:
+        key = _normalize_city_key(p["city"])
+        if key in overrides:
+            cfg = dict(overrides[key])
+            cfg["population"] = p["population"]
+            cfg["census_rank"] = p["rank"]
+            cfg["census_name"] = p["census_name"]
+            built.append(cfg)
+        else:
+            slug = _accela_guess_slug(p["city"])
+            built.append({
+                "city": p["city"],
+                "state": "CA",
+                "url": (
+                    f"https://aca-prod.accela.com/{slug}/Cap/CapHome.aspx?module=Building"
+                ),
+                "platform": "AccelaGuess",
+                "population": p["population"],
+                "census_rank": p["rank"],
+                "census_name": p["census_name"],
+            })
+    if offset:
+        built = built[offset:]
+    if max_cities is not None:
+        built = built[:max_cities]
+    return built
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +272,8 @@ class ReconResult:
     form_fields: list = field(default_factory=list)
     notes: str = ""
     error: str = ""
+    population: int = 0
+    census_rank: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +286,7 @@ class PermitReconSpider:
         self.headless = headless
         self.timeout = timeout
 
-    async def run(self, cities: list) -> list[ReconResult]:
+    async def run(self, cities: list, delay_sec: float = 0) -> list[ReconResult]:
         results = []
         async with async_playwright() as pw:
             browser = await pw.chromium.launch(headless=self.headless)
@@ -185,14 +302,24 @@ class PermitReconSpider:
                 result = await self._recon_city(context, city_config)
                 await context.close()
                 results.append(result)
-                log.info(f"    Result: {result.tier} | Date Range: {result.date_range_available} | Broad: {result.broad_search_possible}")
+                log.info(
+                    f"    Result: {result.tier} | Date Range: {result.date_range_available} | "
+                    f"Broad: {result.broad_search_possible}"
+                )
+                if delay_sec > 0:
+                    await asyncio.sleep(delay_sec)
             await browser.close()
         return results
 
     async def _recon_city(self, context, config: dict) -> ReconResult:
         result = ReconResult(
-            city=config["city"], state=config["state"], url=config["url"],
-            platform=config["platform"], timestamp=datetime.now().isoformat(),
+            city=config["city"],
+            state=config["state"],
+            url=config["url"],
+            platform=config["platform"],
+            timestamp=datetime.now().isoformat(),
+            population=int(config.get("population") or 0),
+            census_rank=int(config.get("census_rank") or 0),
         )
         step_counter = [0]
 
@@ -275,7 +402,7 @@ class PermitReconSpider:
                 best_selector = f"iframe[src*='{url.split('/')[-1]}']" if url else "iframe"
                 result.iframe_selector = best_selector
                 log_step("frame_switch", f"iframe at {frame.url}", best_selector, True,
-                         f"Switched into child frame")
+                         "Switched into child frame")
                 return frame
 
         iframe_els = await page.locator("iframe").all()
@@ -380,19 +507,21 @@ class PermitReconSpider:
 # ---------------------------------------------------------------------------
 
 def save_results(results, json_path, csv_path):
-    with open(json_path, "w") as f:
+    with open(json_path, "w", encoding="utf-8") as f:
         json.dump([asdict(r) for r in results], f, indent=2)
     log.info(f"Saved full recon data → {json_path}")
 
-    with open(csv_path, "w", newline="") as f:
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=[
-            "city", "state", "platform", "tier", "broad_search_possible",
-            "date_range_available", "address_required", "has_permit_type_filter",
-            "iframe_detected", "search_page_url", "error", "url",
+            "census_rank", "population", "city", "state", "platform", "tier",
+            "broad_search_possible", "date_range_available", "address_required",
+            "has_permit_type_filter", "iframe_detected", "search_page_url", "error", "url",
         ])
         writer.writeheader()
         for r in results:
             writer.writerow({
+                "census_rank": r.census_rank,
+                "population": r.population,
                 "city": r.city, "state": r.state, "platform": r.platform,
                 "tier": r.tier, "broad_search_possible": r.broad_search_possible,
                 "date_range_available": r.date_range_available,
@@ -405,28 +534,85 @@ def save_results(results, json_path, csv_path):
     log.info(f"Saved summary CSV → {csv_path}")
 
 
-def print_summary(results):
-    print("\n" + "="*70)
-    print("PERMIT PORTAL RECON SUMMARY — TOP 50 CA CITIES")
-    print("="*70)
+def print_summary(results, title: str = "PERMIT PORTAL RECON SUMMARY"):
+    print("\n" + "=" * 70)
+    print(f"{title} — {len(results)} jurisdictions")
+    print("=" * 70)
     tier_counts = {}
     for r in results:
         tier_counts[r.tier] = tier_counts.get(r.tier, 0) + 1
         icon = {"TIER1_BROAD": "✅", "TIER2_PARTIAL": "🟡",
                 "TIER3_LOCKED": "❌", "ERROR": "💥"}.get(r.tier, "❓")
-        print(f"{icon} {r.city}, {r.state} ({r.platform}) → {r.tier}")
-    print("-"*70)
+        pop = f" pop={r.population}" if r.population else ""
+        print(f"{icon} {r.city}, {r.state} ({r.platform}){pop} → {r.tier}")
+    print("-" * 70)
     for tier, count in sorted(tier_counts.items()):
         print(f"  {tier}: {count}")
-    print("="*70 + "\n")
+    print("=" * 70 + "\n")
 
 
-async def main():
-    spider = PermitReconSpider(headless=True, timeout=15000)
-    results = await spider.run(CITIES)
-    save_results(results, "permit_recon_results.json", "permit_recon_results.csv")
+def save_targets_json(cities: list, path: str) -> None:
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(cities, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    log.info(f"Saved target list ({len(cities)} rows) → {path}")
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Permit portal recon (Playwright + optional Census list)")
+    p.add_argument(
+        "--census",
+        type=int,
+        metavar="N",
+        default=0,
+        help="Use top N California places from 2020 Census (by population); merge seed URLs",
+    )
+    p.add_argument(
+        "--no-cdp",
+        action="store_true",
+        help="With --census: exclude CDPs (cities + towns only)",
+    )
+    p.add_argument("--offset", type=int, default=0, help="Skip first N targets after sort")
+    p.add_argument("--max", type=int, default=None, help="Process at most N targets")
+    p.add_argument("--delay", type=float, default=0, help="Seconds between cities (be polite)")
+    p.add_argument("--timeout", type=int, default=15000, help="Playwright default timeout ms")
+    p.add_argument("--headed", action="store_true", help="Show browser")
+    p.add_argument("--list-only", action="store_true", help="Fetch/build list and exit (no recon)")
+    p.add_argument("--write-targets", action="store_true", help="Always write permit_recon_targets.json")
+    p.add_argument("--targets-out", default="permit_recon_targets.json", help="Target list output path")
+    p.add_argument("--json-out", default="permit_recon_results.json")
+    p.add_argument("--csv-out", default="permit_recon_results.csv")
+    return p.parse_args()
+
+
+async def async_main() -> None:
+    args = parse_args()
+    if args.census and args.census > 0:
+        cities = build_recon_city_configs(
+            limit=args.census,
+            exclude_cdp=not args.no_cdp,
+            offset=args.offset,
+            max_cities=args.max,
+        )
+        if args.write_targets or args.list_only:
+            save_targets_json(cities, args.targets_out)
+        if args.list_only:
+            print(f"Wrote {len(cities)} targets to {args.targets_out} (list-only)")
+            return
+    else:
+        cities = list(SEED_CITIES)
+        if args.offset:
+            cities = cities[args.offset:]
+        if args.max is not None:
+            cities = cities[: args.max]
+        if args.write_targets:
+            save_targets_json(cities, args.targets_out)
+
+    spider = PermitReconSpider(headless=not args.headed, timeout=args.timeout)
+    results = await spider.run(cities, delay_sec=args.delay)
+    save_results(results, args.json_out, args.csv_out)
     print_summary(results)
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(async_main())
