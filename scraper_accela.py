@@ -789,15 +789,14 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     _resolve_permit_url_from_href(base_url, permit_num, module, lead)
                     _set_defaults(lead)
             else:
+                # Reuse the same browser context as search/CSV export — Accela (esp. county PDS)
+                # ties session cookies to Citizen Access; a fresh context yields empty/login detail pages.
                 for i, lead in enumerate(leads):
                     permit_num = lead.get('permitNumber')
                     if not permit_num:
                         continue
                     log.info(f'[{city_name}] Details {permit_num} ({i+1}/{len(leads)})...')
-                    detail_context = await browser.new_context(
-                        viewport={'width': 1280, 'height': 800},
-                    )
-                    detail_page = await detail_context.new_page()
+                    detail_page = await context.new_page()
                     try:
                         await _get_permit_details(
                             detail_page, base_url, module, permit_num, lead, config,
@@ -807,7 +806,6 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                         _set_defaults(lead)
                     finally:
                         await detail_page.close()
-                        await detail_context.close()
 
             leads = [l for l in leads if not l.get('_skip_ingest')]
             # Strip internal flags before returning
@@ -1505,6 +1503,11 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         hu = _get_field_from_soup(soup_app, 'Housing Units')
         if hu:
             lead['housingUnits'] = hu
+        # First pass skipped expand — Project Description may only exist after Record Details expand
+        if not (lead.get('projectDescription') or '').strip():
+            pd2 = _get_field_from_soup(soup_app, 'Project Description')
+            if pd2:
+                lead['projectDescription'] = pd2
     else:
         if project_desc_clean:
             first, last = extract_homeowner_name(project_desc_clean, '')
