@@ -470,6 +470,107 @@ async def _download_accela_results_csv(search, city_name: str, source: str) -> s
     return path
 
 
+# Row selectors: classic Accela grid + fallbacks when markup differs by portal/version.
+_ACCELA_RESULT_ROW_SELECTORS = (
+    'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row'
+)
+_ACCELA_RESULT_ROW_SELECTORS_ALT = (
+    'table[id*="gvPermit"] tbody tr, '
+    'table[id*="PermitList"] tbody tr, '
+    'table.ACA_GridView tbody tr'
+)
+
+
+def _soup_select_result_rows(soup):
+    """Parse permit list rows from Accela HTML; try fallbacks if classic classes missing."""
+    rows = soup.select(_ACCELA_RESULT_ROW_SELECTORS)
+    if rows:
+        return rows
+    out = []
+    for tr in soup.select(_ACCELA_RESULT_ROW_SELECTORS_ALT):
+        if tr.find('th') is not None:
+            continue
+        tds = tr.find_all('td')
+        if len(tds) >= 2:
+            out.append(tr)
+    return out
+
+
+async def _wait_accela_results_after_search(search, city_name: str, timeout_ms: int = 120000) -> str:
+    """
+    After Search: wait for result rows, explicit empty message, or timeout.
+    Returns 'rows' or 'empty'.
+    """
+    import time as _time
+    deadline = _time.monotonic() + timeout_ms / 1000.0
+    while _time.monotonic() < deadline:
+        state = await search.evaluate(
+            """() => {
+                const sel = 'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row';
+                let n = document.querySelectorAll(sel).length;
+                if (n > 0) return { k: 'rows', n: n };
+                const alts = [
+                    'table[id*="gvPermit"] tbody tr',
+                    'table[id*="PermitList"] tbody tr',
+                    'table.ACA_GridView tbody tr',
+                ];
+                for (const a of alts) {
+                    const trs = Array.from(document.querySelectorAll(a))
+                        .filter(t => !t.querySelector('th') && t.querySelectorAll('td').length >= 2);
+                    if (trs.length > 0) return { k: 'rows', n: trs.length };
+                }
+                const t = (document.body && document.body.innerText || '').toLowerCase();
+                const hints = [
+                    'no records', 'no record', 'no results', 'did not return',
+                    'there are no records', '0 records', 'nothing found',
+                    'your search did not return', 'no data',
+                ];
+                if (hints.some(h => t.includes(h))) return { k: 'empty' };
+                return { k: 'wait' };
+            }"""
+        )
+        kind = state.get('k')
+        if kind == 'wait':
+            await search.wait_for_timeout(800)
+            continue
+        if kind == 'rows':
+            log.info(f'[{city_name}] Results grid ready ({state.get("n", "?")} row elements)')
+            return 'rows'
+        if kind == 'empty':
+            log.info(f'[{city_name}] Search returned no records (empty state)')
+            return 'empty'
+
+    final = await search.evaluate(
+        """() => {
+            const t = (document.body && document.body.innerText || '').toLowerCase();
+            if (t.includes('no record') || t.includes('no results') || t.includes('did not return'))
+                return 'empty';
+            const sel = 'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row';
+            if (document.querySelectorAll(sel).length > 0) return 'rows';
+            const alts = [
+                'table[id*="gvPermit"] tbody tr',
+                'table[id*="PermitList"] tbody tr',
+                'table.ACA_GridView tbody tr',
+            ];
+            for (const a of alts) {
+                const trs = Array.from(document.querySelectorAll(a))
+                    .filter(x => !x.querySelector('th') && x.querySelectorAll('td').length >= 2);
+                if (trs.length > 0) return 'rows';
+            }
+            return 'unknown';
+        }"""
+    )
+    if final == 'empty':
+        log.warning(f'[{city_name}] Grid wait timed out; page indicates no results — treating as empty')
+        return 'empty'
+    if final == 'rows':
+        log.warning(f'[{city_name}] Grid appeared after extended wait — continuing')
+        return 'rows'
+    raise TimeoutError(
+        f'[{city_name}] No result rows or empty-state text after search (Accela UI may have changed)'
+    )
+
+
 # ---------------------------------------------------------------------------
 # Generic Accela scraper
 # ---------------------------------------------------------------------------
@@ -648,11 +749,10 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             if not clicked:
                 raise Exception('Could not find search button')
 
-            await search.wait_for_selector(
-                'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row',
-                timeout=60000
-            )
-            log.info(f'[{city_name}] Results loaded')
+            outcome = await _wait_accela_results_after_search(search, city_name, timeout_ms=120000)
+            if outcome == 'empty':
+                log.info(f'[{city_name}] No permits in range — returning empty list')
+                return []
 
             # CSV export first for all cities (full row → accelaCsv); HTML grid is fallback.
             # Set skip_csv_download: True in city config to force HTML-only.
@@ -714,7 +814,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
     while True:
         html = await page.content()
         soup = BeautifulSoup(html, 'lxml')
-        rows = soup.select('tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row')
+        rows = _soup_select_result_rows(soup)
         log.info(f'  Scraping page {page_num}: {len(rows)} rows')
 
         for row_idx, row in enumerate(rows):
@@ -810,10 +910,12 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 break
 
         await page.click(f'a:text("{page_num + 1}")')
-        await page.wait_for_selector(
-            'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row',
-            timeout=30000
-        )
+        cfg = config or {}
+        pname = cfg.get('name') or 'permits'
+        nxt = await _wait_accela_results_after_search(page, pname, timeout_ms=45000)
+        if nxt == 'empty':
+            log.warning(f'  Page {page_num + 1} click returned no rows — stopping pagination')
+            break
         page_num += 1
 
     seen = set()
