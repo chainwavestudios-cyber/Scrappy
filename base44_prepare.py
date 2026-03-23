@@ -43,7 +43,8 @@ def prepare_leads_for_base44(leads: list[dict[str, Any]]) -> list[dict[str, Any]
 
     Address order: existing address/siteAddress (e.g. CSV/grid) → project
     description line → Owner on Application mailing (ownerMailingAddress).
-    Maps homeownerEmail → email, homeownerPhone → phoneNumber (digits string).
+    Maps homeownerEmail → email, homeownerPhone → phoneNumber (digits string)
+    only when present; missing contact after parse rules is fine — omit aliases.
     Clears numberOfPanels unless scraper set _panels_from_app_info.
     Empty jobValue → None.
     """
