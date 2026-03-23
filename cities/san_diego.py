@@ -11,12 +11,12 @@ CONFIGS = {
         'module':             'Building',
         # Dropdown label must match portal option text (see ddlGSPermitType)
         'permit_type':        'Residential Alteration or Addition - Plan Check-Permit',
+        # Always narrow Accela search to OTC project name
         'use_project_name':   'OTC',
-        # OTC rows usually say "OTC" in description, not "solar" — skip HTML keyword gate
-        'skip_solar_description_filter': True,
-        # Detail page: APPLICATION INFORMATION → Primary Scope Code (residential PV roof mount)
-        'require_primary_scope_contains': ['8002', 'Solar Photovoltaic'],
+        # CSV / grid Short Notes must contain 8002 — solar vs non-solar for this permit type
         'short_notes_filter': '8002',
+        # OTC rows often say "OTC" / "PV" in text, not the word "solar" — skip description keyword gate
+        'skip_solar_description_filter': True,
         'source':             'san_diego_accela',
         'lead_category':      'residential',
         'daily_only':         True,

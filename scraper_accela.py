@@ -1180,9 +1180,20 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
         if re.search(r'\b(ST|AVE|RD|DR|LN|CT|WAY|BLVD|CIR)\b', ln, re.I) and re.search(r'\d', ln):
             addr_line = re.sub(r'\s+', ' ', ln)
 
-    if addr_line:
+    # Job-site address usually comes from CSV; owner block is often mailing — do not replace.
+    if addr_line and not (lead.get('siteAddress') or lead.get('address') or '').strip():
         lead['siteAddress'] = addr_line
         lead['address'] = addr_line
+    elif addr_line:
+        lead['ownerMailingAddress'] = addr_line
+
+    pm = re.search(
+        r'Primary\s+Phone\s*:?\s*([\d\s\-\(\)\.]+)',
+        blob,
+        re.I,
+    )
+    if pm:
+        lead['homeownerPhone'] = re.sub(r'\s+', ' ', pm.group(1)).strip()
 
     lines = [x.strip() for x in blob.split('\n') if x.strip()]
     name_line = None
@@ -1213,6 +1224,19 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
         parts = name_line.split()
         lead['homeownerFirstName'] = parts[0]
         lead['homeownerLastName'] = ' '.join(parts[1:]) if len(parts) > 1 else ''
+
+
+async def _click_more_details_visible(detail_page):
+    """Accela Contacts (and Record) panels often hide rows until More Details is clicked."""
+    await detail_page.evaluate("""
+        () => {
+            const els = Array.from(document.querySelectorAll('a, button, span'));
+            const more = els.find(l => (l.textContent || '').includes('More Details'));
+            if (more) { more.click(); return true; }
+            return false;
+        }
+    """)
+    await detail_page.wait_for_timeout(1800)
 
 
 async def _expand_accela_detail_sections(detail_page):
@@ -1278,7 +1302,11 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=20000)
     await detail_page.wait_for_timeout(2000)
 
-    await _expand_accela_detail_sections(detail_page)
+    owner_fc = bool(lead.get('_owner_from_contacts'))
+    # San Diego PDS: Record Details (LP + Project Description) is visible first; expand
+    # Application Information only after Contacts → More Details → owner.
+    if not owner_fc:
+        await _expand_accela_detail_sections(detail_page)
 
     html = await detail_page.content()
     soup = BeautifulSoup(html, 'lxml')
@@ -1396,14 +1424,17 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     # Work Location — site address (Chula Vista: multiline under label)
     work_loc = _extract_work_location_accela(soup)
     if work_loc:
-        lead['siteAddress'] = work_loc
+        if owner_fc and (lead.get('siteAddress') or lead.get('address') or '').strip():
+            pass
+        else:
+            lead['siteAddress'] = work_loc
 
     # Project description — full text
     project_desc_clean = get_field('Project Description')
     if project_desc_clean:
         lead['projectDescription'] = project_desc_clean
 
-    # Owner from Contacts tab (San Diego) or from description (other cities)
+    # Owner from Contacts tab (San Diego PDS): Contacts → More Details → Owner on Application
     if lead.get('_owner_from_contacts'):
         await detail_page.evaluate("""
             () => {
@@ -1412,7 +1443,8 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
                 if (c) c.click();
             }
         """)
-        await detail_page.wait_for_timeout(1500)
+        await detail_page.wait_for_timeout(2000)
+        await _click_more_details_visible(detail_page)
         html2 = await detail_page.content()
         soup2 = BeautifulSoup(html2, 'lxml')
         _parse_owner_contacts_soup(soup2, lead)
@@ -1487,7 +1519,8 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
 def _set_defaults(lead):
     for field in ['jobValue', 'subType', 'occupancyType', 'numberOfPanels',
                   'licensedProfessional', 'systemSize', 'projectDescription',
-                  'ownerOnApplication', 'homeownerEmail', 'electricalServiceUpgrade',
+                  'ownerOnApplication', 'homeownerEmail', 'homeownerPhone',
+                  'ownerMailingAddress', 'electricalServiceUpgrade',
                   'advancedEnergyStorage', 'crossStreet', 'descriptionOfWork',
                   'numberOfBuildings', 'housingUnits', 'address']:
         lead.setdefault(field, '')
