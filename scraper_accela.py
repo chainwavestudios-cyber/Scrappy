@@ -995,6 +995,15 @@ def _get_field_from_soup(soup, label):
     return ''
 
 
+def _accela_field_first_nonempty(soup, *labels: str) -> str:
+    """Return the first Accela label/value match among alternate portal wordings."""
+    for lab in labels:
+        v = _get_field_from_soup(soup, lab)
+        if (v or '').strip():
+            return v.strip()
+    return ''
+
+
 def _extract_labeled_multiline(soup, label: str) -> str:
     """
     Accela often puts 'Project Description' (and similar) in one td/div with
@@ -1314,6 +1323,22 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
         parts = name_line.split()
         lead['homeownerFirstName'] = parts[0]
         lead['homeownerLastName'] = ' '.join(parts[1:]) if len(parts) > 1 else ''
+        return
+
+    # Fallback: owner name on same line as label or odd line breaks (PDS HTML varies)
+    if blob:
+        stripped = re.sub(r'(?i)owner\s+on\s+application\s*:?', ' ', blob)
+        for line in re.split(r'[\n|]+', stripped):
+            ln = line.strip()
+            if len(ln) < 4 or '@' in ln or re.search(r'\b\d{5}\b', ln):
+                continue
+            if re.search(r'\b(st|ave|rd|dr|ln|ct|way|blvd|cir|hwy|pl)\b', ln, re.I):
+                continue
+            first, last = extract_homeowner_name(ln, '')
+            if first:
+                lead['homeownerFirstName'] = first
+                lead['homeownerLastName'] = last
+                break
 
 
 async def _try_parse_owner_from_contacts_tab(detail_page, lead: dict) -> None:
@@ -1576,13 +1601,34 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         html_app = await detail_page.content()
         soup_app = BeautifulSoup(html_app, 'lxml')
 
-        kwh = _get_field_from_soup(soup_app, 'Rounded Kilowatts Total System Size')
+        # First HTML pass skipped section expand — job value / kW / ESS live here for PDS.
+        jv_app = _extract_job_value_accela(soup_app)
+        if (jv_app or '').strip():
+            lead['jobValue'] = jv_app
+
+        kwh = _accela_field_first_nonempty(
+            soup_app,
+            'Rounded Kilowatts Total System Size',
+            'DC System Size',
+            'System Size',
+            'Total System Size in Kilowatts',
+        )
         if kwh:
-            lead['systemSize'] = kwh + ' kW'
-        elec = _get_field_from_soup(soup_app, 'Electrical Service Upgrade')
+            lead['systemSize'] = kwh + (' kW' if 'kw' not in kwh.lower() else '')
+        elec = _accela_field_first_nonempty(
+            soup_app,
+            'Electrical Service Upgrade',
+            'Electrical Upgrade',
+            'Service Upgrade',
+        )
         if elec:
             lead['electricalServiceUpgrade'] = elec
-        ess = _get_field_from_soup(soup_app, 'Advanced Energy Storage System')
+        ess = _accela_field_first_nonempty(
+            soup_app,
+            'Advanced Energy Storage System',
+            'Energy Storage System',
+            'Battery Energy Storage',
+        )
         if ess:
             lead['advancedEnergyStorage'] = ess
         cs = _get_field_from_soup(soup_app, 'Cross Street')
