@@ -3,6 +3,8 @@
 General search: permit type *Residential Solar* + date range. All data comes from
 the results grid only (no CSV export, no detail pages). Column 0 is the row
 checkbox/lead-in; real fields start at index 1.
+
+Search/detail keys: see cities/__init__.py (ACCELA_CITY_CONFIG_KEYS).
 """
 
 CONFIGS = {

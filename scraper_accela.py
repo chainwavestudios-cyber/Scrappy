@@ -1316,6 +1316,22 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
         lead['homeownerLastName'] = ' '.join(parts[1:]) if len(parts) > 1 else ''
 
 
+async def _try_parse_owner_from_contacts_tab(detail_page, lead: dict) -> None:
+    """Contacts → More Details → Owner on Application information (Accela)."""
+    await detail_page.evaluate("""
+        () => {
+            const links = Array.from(document.querySelectorAll('a'));
+            const c = links.find(l => l.textContent.trim() === 'Contacts');
+            if (c) c.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(2000)
+    await _click_more_details_visible(detail_page)
+    html2 = await detail_page.content()
+    soup2 = BeautifulSoup(html2, 'lxml')
+    _parse_owner_contacts_soup(soup2, lead)
+
+
 async def _click_more_details_visible(detail_page):
     """Accela Contacts (and Record) panels often hide rows until More Details is clicked."""
     await detail_page.evaluate("""
@@ -1496,7 +1512,12 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     # ---------------------------------------------------------------------------
     lead['subType']        = get_field('Sub Type')
     lead['occupancyType']  = get_field('What is the occupancy type?')
-    lead['numberOfPanels'] = get_field('Number of Panels') or get_field('Number of Modules')
+    _pn = get_field('Number of Panels') or get_field('Number of Modules')
+    if (_pn or '').strip():
+        lead['numberOfPanels'] = _pn.strip()
+        lead['_panels_from_app_info'] = True
+    else:
+        lead['numberOfPanels'] = ''
 
     # Work Location first — Chula Vista: main record shows multiline under Work Location
     work_loc = _extract_work_location_accela(soup)
@@ -1576,6 +1597,13 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         hu = _get_field_from_soup(soup_app, 'Housing Units')
         if hu:
             lead['housingUnits'] = hu
+        pan = (
+            _get_field_from_soup(soup_app, 'Number of Panels')
+            or _get_field_from_soup(soup_app, 'Number of Modules')
+        )
+        if (pan or '').strip():
+            lead['numberOfPanels'] = pan.strip()
+            lead['_panels_from_app_info'] = True
         # First pass skipped expand — full Project Description text after expand (multiline)
         if not (lead.get('projectDescription') or '').strip():
             pd2 = (
@@ -1619,6 +1647,10 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         hu = get_field('Housing Units')
         if hu:
             lead['housingUnits'] = hu
+
+    # Optional: same Contacts / Owner on Application path as San Diego (set in city CONFIGS)
+    if cfg.get('parse_owner_on_application') and not cfg.get('owner_from_contacts'):
+        await _try_parse_owner_from_contacts_tab(detail_page, lead)
 
     _sync_address_zip_for_ingest(lead)
 

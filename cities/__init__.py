@@ -2,6 +2,36 @@
 City configs for Accela scrapers — one file per city (or city group).
 Add new cities by creating cities/<city_name>.py with a CONFIGS dict.
 A syntax error in one file won't break the others.
+
+ACCELA_CITY_CONFIG_KEYS (read by scraper_accela.scrape_accela_async)
+--------------------------------------------------------------------
+Portal / search
+  name, base_url, module          — Accela agency + module= query param
+  portal_url                      — Deep link if CapHome URL is non-default
+  permit_type                     — Exact ddlGSPermitType option text (optional)
+  use_project_name                — General search “Project Name” filter (e.g. OTC)
+  portal_pds_iframe               — True: Default.aspx + PDS entry + iframe scan
+  pds_entry_link_names            — Labels for PDS tile click (default ['PDS'])
+
+CSV / grid
+  skip_csv_download               — True: HTML grid only (no export)
+  skip_detail_fetch               — True: no CapDetail navigation
+  col_date, col_permit_num, …     — HTML <td> indices (0 = row checkbox when present)
+  skip_address_apn_strip          — True: keep full address string from grid
+  short_notes_filter              — CSV/grid Short Notes must contain substring (solar gate)
+  skip_solar_description_filter   — True: skip description keyword solar filter
+
+Detail / enrich
+  owner_from_contacts             — True: San Diego-style Record→Contacts→expand→kW
+  parse_owner_on_application      — True: Contacts→More Details→Owner on Application
+  require_primary_scope_contains  — Optional list of substrings (rare; mostly unused)
+
+Source / ingest prep
+  source, lead_category             — Lead metadata
+  daily_only, issued_filter_days  — Row filters (see _accela_row_passes_filters)
+
+Base44 normalization (app.py → base44_prepare.prepare_leads_for_base44) runs after
+scrape; it does not duplicate these keys but uses scraped address / owner fields.
 """
 import importlib
 import logging

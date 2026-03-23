@@ -1,4 +1,7 @@
-"""San Diego County — different portal, same Accela engine."""
+"""San Diego County — different portal, same Accela engine.
+
+Search/detail keys: see cities/__init__.py (ACCELA_CITY_CONFIG_KEYS).
+"""
 
 CONFIGS = {
     'san_diego_residential': {

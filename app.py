@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, send_file
 from backup import backup_bp
+from base44_prepare import prepare_leads_for_base44
 import requests
 import os
 import glob
@@ -102,6 +103,8 @@ def post_to_base44(
         if campaign_id:
             lead['campaignId'] = campaign_id
 
+    prepared = prepare_leads_for_base44(leads)
+
     try:
         res = requests.post(
             BASE44_INGEST_URL,
@@ -109,7 +112,7 @@ def post_to_base44(
                 'x-internal-secret': BASE44_SECRET,
                 'Content-Type':      'application/json',
             },
-            json={'leads': leads, 'campaign_id': campaign_id or ''},
+            json={'leads': prepared, 'campaign_id': campaign_id or ''},
             timeout=60
         )
         result = res.json()
