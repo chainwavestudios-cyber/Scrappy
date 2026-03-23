@@ -1,5 +1,8 @@
 FROM python:3.11-slim
 
+# Render: set Health Check Path to /health (or /). Never use /campaign/cities — it
+# imports Playwright and will time out or OOM during deploy health probes.
+
 # Install system dependencies for Playwright
 RUN apt-get update && apt-get install -y \
     wget \

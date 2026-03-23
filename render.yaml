@@ -1,0 +1,11 @@
+# Render Blueprint — optional: connect repo + "Apply" to sync settings.
+# Critical: health checks must stay on a lightweight route. Do NOT use
+# /campaign/cities, /cities, or any path that imports Playwright — that will
+# fail deploy (timeout/OOM). Use /health or /.
+services:
+  - type: web
+    name: scrappy
+    runtime: docker
+    dockerfilePath: ./dockerfile
+    # Must stay lightweight — see comment at top of this file.
+    healthCheckPath: /health
