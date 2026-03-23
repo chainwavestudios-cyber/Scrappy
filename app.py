@@ -30,10 +30,15 @@ try:
         except Exception as e:
             print(f'[scheduler] Hourly backup failed: {e}')
 
-    _scheduler = BackgroundScheduler()
-    _scheduler.add_job(_scheduled_backup, 'cron', minute=0)
-    _scheduler.start()
-    print('[scheduler] Hourly backup scheduler started')
+    _gh_token = os.environ.get('GITHUB_TOKEN', '').strip()
+    _gh_repo = os.environ.get('GITHUB_BACKUP_REPO', '').strip()
+    if _gh_token and _gh_repo:
+        _scheduler = BackgroundScheduler()
+        _scheduler.add_job(_scheduled_backup, 'cron', minute=0)
+        _scheduler.start()
+        print('[scheduler] Hourly backup scheduler started (GITHUB_TOKEN + GITHUB_BACKUP_REPO set)')
+    else:
+        print('[scheduler] Hourly backup skipped — set GITHUB_TOKEN and GITHUB_BACKUP_REPO to enable')
 except ImportError:
     print('[scheduler] apscheduler not installed — add to requirements.txt to enable hourly backups')
 except Exception as e:
