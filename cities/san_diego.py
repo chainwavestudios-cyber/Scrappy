@@ -2,7 +2,7 @@
 
 CONFIGS = {
     'san_diego_residential': {
-        'name':               'San Diego',
+        'name':               'San Diego — Residential',
         'base_url':           'https://publicservices.sandiegocounty.gov/CitizenAccess',
         'portal_url':         'https://publicservices.sandiegocounty.gov/CitizenAccess/Default.aspx',
         # Default.aspx: click PDS entry, then use iframe (or main) where Accela form lives
@@ -28,7 +28,7 @@ CONFIGS = {
         'col_address':        9,
     },
     'san_diego_commercial': {
-        'name':               'San Diego',
+        'name':               'San Diego — Commercial',
         'base_url':           'https://publicservices.sandiegocounty.gov/CitizenAccess',
         'portal_url':         'https://publicservices.sandiegocounty.gov/CitizenAccess/Default.aspx',
         'portal_pds_iframe':  True,
