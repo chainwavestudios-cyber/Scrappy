@@ -336,7 +336,18 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
             permit_date_str = _csv_get(row, 'Date', 'File Date', 'Opened Date')
             project_name = _csv_get(row, 'Project Name', 'Project')
             permit_type = _csv_get(row, 'Permit Type', 'Record Type', 'Type')
-            raw_address = _csv_get(row, 'Address', 'Location', 'Site Address', 'Parcel Address')
+            raw_address = _csv_get(
+                row,
+                'Address',
+                'Full Address',
+                'Property Address',
+                'Street Address',
+                'Site Address',
+                'Site Location',
+                'Parcel Address',
+                'Location',
+                'Primary Address',
+            )
 
             if not _accela_row_passes_filters(description, short_notes, status, permit_date_str, cfg):
                 log.info(f'  CSV skip (filter): {(description or permit_num)[:60]}')
@@ -383,6 +394,7 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                 'enrichmentStage':      'scraped',
                 'uniqueId':             f'{cfg.get("source", source)}_{permit_num}',
                 'detailHref':           None,
+                'jobInfo':              '',
                 '_owner_from_contacts':  cfg.get('owner_from_contacts', False),
                 # Full export row — all portal columns in one place for APIs / debugging
                 'accelaCsv':            raw,
@@ -928,6 +940,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 'uniqueId':             f'{cfg.get("source", source)}_{permit_num}',
                 # Internal flags — stripped before output
                 'detailHref':           href,
+                'jobInfo':              '',
                 '_owner_from_contacts':  cfg.get('owner_from_contacts', False),
             })
 
@@ -1138,6 +1151,21 @@ def _accela_table_row_labeled(soup, label_lc: str) -> str:
     return ''
 
 
+def _build_job_info_text(kwh: str, elec: str, ess: str) -> str:
+    """Single Base44 field: Application Information lines (kW, electrical, ESS)."""
+    lines = []
+    kk = (kwh or '').strip()
+    if kk:
+        lines.append(f'Rounded Kilowatts Total System Size: {kk}')
+    ee = (elec or '').strip()
+    if ee:
+        lines.append(f'Electrical Service Upgrade: {ee}')
+    ss = (ess or '').strip()
+    if ss:
+        lines.append(f'Advanced Energy Storage System: {ss}')
+    return '\n'.join(lines)
+
+
 def _infer_pds_fields_from_narrative(lead: dict) -> None:
     """Fill Cross Street / Electrical upgrade hints from OTC project narrative when labels are empty."""
     blob = f"{lead.get('projectDescription') or ''}\n{lead.get('description') or ''}"
@@ -1269,7 +1297,8 @@ def _primary_scope_allowed(soup, cfg: dict) -> bool:
 
 def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
     """
-    San Diego / Accela Contacts tab: Owner on Application — name, address, zip, email.
+    San Diego / Accela Contacts (expanded): Owner on Application — name, zip, email, phone.
+    Site address stays from CSV when already set.
     """
     blob = ''
     best_len = 0
@@ -1278,10 +1307,9 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
         tl = t.lower()
         if 'owner on application' not in tl:
             continue
-        if '@' in t or 'e-mail' in tl or 'email' in tl:
-            if len(t) > best_len:
-                blob = t
-                best_len = len(t)
+        if len(t) > best_len:
+            blob = t
+            best_len = len(t)
     if not blob:
         for el in soup2.find_all(string=re.compile(r'owner\s+on\s+application', re.I)):
             p = el.find_parent(['div', 'table', 'td', 'tr'])
@@ -1325,10 +1353,11 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
     elif addr_line:
         lead['ownerMailingAddress'] = addr_line
 
-    pm = re.search(
-        r'Primary\s+Phone\s*:?\s*([\d\s\-\(\)\.]+)',
-        blob,
-        re.I,
+    pm = (
+        re.search(r'Primary\s+Phone\s*:?\s*([\d\s\-\(\)\.]+)', blob, re.I)
+        or re.search(r'Business\s+Phone\s*:?\s*([\d\s\-\(\)\.]+)', blob, re.I)
+        or re.search(r'(?:Cell|Mobile)\s+Phone\s*:?\s*([\d\s\-\(\)\.]+)', blob, re.I)
+        or re.search(r'Phone\s*:?\s*([\d\s\-\(\)\.]{10,})', blob, re.I)
     )
     if pm:
         lead['homeownerPhone'] = re.sub(r'\s+', ' ', pm.group(1)).strip()
@@ -1381,15 +1410,8 @@ def _parse_owner_contacts_soup(soup2, lead: dict) -> None:
 
 
 async def _try_parse_owner_from_contacts_tab(detail_page, lead: dict) -> None:
-    """Contacts → More Details → Owner on Application information (Accela)."""
-    await detail_page.evaluate("""
-        () => {
-            const links = Array.from(document.querySelectorAll('a'));
-            const c = links.find(l => l.textContent.trim() === 'Contacts');
-            if (c) c.click();
-        }
-    """)
-    await detail_page.wait_for_timeout(2000)
+    """Contacts heading → More Details → Owner on Application information (Accela)."""
+    await _pds_expand_contacts_heading(detail_page)
     await _click_more_details_visible(detail_page)
     html2 = await detail_page.content()
     soup2 = BeautifulSoup(html2, 'lxml')
@@ -1426,6 +1448,54 @@ async def _pds_expand_record_more_details(detail_page) -> None:
         }
     """)
     await detail_page.wait_for_timeout(1800)
+
+
+async def _pds_expand_contacts_heading(detail_page) -> None:
+    """
+    PDS accordion: click the Contacts heading (h1 aria 'Expand Contacts' or link fallback).
+    """
+    await detail_page.evaluate("""
+        () => {
+            const heads = Array.from(document.querySelectorAll('h1, h2, [role="heading"]'));
+            let h = heads.find(el => {
+                const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                const t = (el.textContent || '').trim();
+                return aria.includes('expand contacts')
+                    || (t === 'Contacts' && aria.includes('contact'));
+            });
+            if (!h) {
+                h = heads.find(el => (el.textContent || '').trim() === 'Contacts');
+            }
+            if (h) { h.click(); return; }
+            const links = Array.from(document.querySelectorAll('a'));
+            const a = links.find(l => (l.textContent || '').trim() === 'Contacts');
+            if (a) a.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(2200)
+
+
+async def _pds_expand_application_information_heading(detail_page) -> None:
+    """PDS: expand Application Information (h1 aria 'Expand Application Information' or span id fallback)."""
+    await detail_page.evaluate("""
+        () => {
+            const heads = Array.from(document.querySelectorAll('h1, h2, [role="heading"]'));
+            let h = heads.find(el => {
+                const aria = (el.getAttribute('aria-label') || '').toLowerCase();
+                const t = (el.textContent || '').trim();
+                return aria.includes('expand application information')
+                    || (aria.includes('application information') && aria.includes('expand'));
+            });
+            if (!h) {
+                h = heads.find(el => (el.textContent || '').trim() === 'Application Information');
+            }
+            if (h) { h.click(); return; }
+            const byId = document.getElementById('ctl00_PlaceHolderMain_PermitDetailList1_lblASIList')
+                || document.querySelector('[id$="PermitDetailList1_lblASIList"]');
+            if (byId) byId.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(2500)
 
 
 async def _pds_click_application_information(detail_page) -> None:
@@ -1642,50 +1712,58 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         if not (lead.get('description') or '').strip():
             lead['description'] = project_desc_clean
 
-    # System size — try labeled fields, then project description / CSV description
-    system_size = (
-        get_field('System Size') or
-        get_field('DC System Size') or
-        get_field('Rounded Kilowatts Total System Size') or
-        get_field('kW') or
-        ''
-    )
-    if not system_size:
-        system_size = parse_system_size(project_desc_clean or '')
-    if not system_size and lead.get('description'):
-        system_size = parse_system_size(lead['description'])
-    if system_size:
-        lead['systemSize'] = system_size
+    # System size — PDS + Contacts flow reads kW from Application Information later.
+    if not (owner_fc and pds):
+        system_size = (
+            get_field('System Size') or
+            get_field('DC System Size') or
+            get_field('Rounded Kilowatts Total System Size') or
+            get_field('kW') or
+            ''
+        )
+        if not system_size:
+            system_size = parse_system_size(project_desc_clean or '')
+        if not system_size and lead.get('description'):
+            system_size = parse_system_size(lead['description'])
+        if system_size:
+            lead['systemSize'] = system_size
 
-    # Owner from Contacts tab (San Diego PDS): Contacts → More Details → Owner on Application
+    # PDS: More Details (above) → expand Contacts h1 → More Details in panel → Owner on Application.
+    # Then expand Application Information h1 (same accordion stack) for kW / electrical / ESS → jobInfo.
     if lead.get('_owner_from_contacts'):
-        await detail_page.evaluate("""
-            () => {
-                const links = Array.from(document.querySelectorAll('a'));
-                const c = links.find(l => l.textContent.trim() === 'Contacts');
-                if (c) c.click();
-            }
-        """)
-        await detail_page.wait_for_timeout(2000)
+        await _pds_expand_contacts_heading(detail_page)
         await _click_more_details_visible(detail_page)
         html2 = await detail_page.content()
         soup2 = BeautifulSoup(html2, 'lxml')
         _parse_owner_contacts_soup(soup2, lead)
 
-        # Contacts tab swaps the DOM — old soup is stale. Return to Record Details,
-        # then PDS: More Details → Application Information (portal QA IDs), else Accela chain.
-        await _click_record_details_tab(detail_page)
         if pds:
-            await _pds_expand_record_then_application_info(detail_page)
+            await _pds_expand_application_information_heading(detail_page)
         else:
+            await _click_record_details_tab(detail_page)
             await _expand_accela_detail_sections(detail_page)
         html_app = await detail_page.content()
         soup_app = BeautifulSoup(html_app, 'lxml')
 
-        # First HTML pass skipped section expand — job value / kW / ESS live here for PDS.
         jv_app = _extract_job_value_accela(soup_app)
         if (jv_app or '').strip():
             lead['jobValue'] = jv_app
+
+        if not (lead.get('licensedProfessional') or '').strip():
+            lpa = _accela_table_row_labeled(soup_app, 'licensed professional')
+            if lpa:
+                lead['licensedProfessional'] = lpa
+
+        if not (lead.get('projectDescription') or '').strip():
+            pd2 = (
+                _accela_table_row_labeled(soup_app, 'project description')
+                or _extract_labeled_multiline(soup_app, 'Project Description')
+                or _get_field_from_soup(soup_app, 'Project Description')
+            )
+            if pd2:
+                lead['projectDescription'] = pd2
+                if not (lead.get('description') or '').strip():
+                    lead['description'] = pd2
 
         kwh = _accela_field_first_nonempty(
             soup_app,
@@ -1694,24 +1772,32 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
             'System Size',
             'Total System Size in Kilowatts',
         )
-        if kwh:
-            lead['systemSize'] = kwh + (' kW' if 'kw' not in kwh.lower() else '')
         elec = _accela_field_first_nonempty(
             soup_app,
             'Electrical Service Upgrade',
             'Electrical Upgrade',
             'Service Upgrade',
         )
-        if elec:
-            lead['electricalServiceUpgrade'] = elec
         ess = _accela_field_first_nonempty(
             soup_app,
             'Advanced Energy Storage System',
             'Energy Storage System',
             'Battery Energy Storage',
         )
+        if not (elec or '').strip():
+            narr = f"{lead.get('projectDescription') or ''}\n{lead.get('description') or ''}"
+            if re.search(r'\(?\s*no\s+meter\s+upgrade\s*\)?', narr, re.I):
+                elec = 'No'
+        if elec:
+            lead['electricalServiceUpgrade'] = elec
         if ess:
             lead['advancedEnergyStorage'] = ess
+        jt = _build_job_info_text(kwh, elec, ess)
+        if jt:
+            lead['jobInfo'] = jt
+        if kwh:
+            lead['systemSize'] = kwh + (' kW' if 'kw' not in kwh.lower() else '')
+
         cs = _get_field_from_soup(soup_app, 'Cross Street')
         if cs:
             lead['crossStreet'] = cs
@@ -1731,21 +1817,6 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         if (pan or '').strip():
             lead['numberOfPanels'] = pan.strip()
             lead['_panels_from_app_info'] = True
-        if not (lead.get('licensedProfessional') or '').strip():
-            lpa = _accela_table_row_labeled(soup_app, 'licensed professional')
-            if lpa:
-                lead['licensedProfessional'] = lpa
-
-        if not (lead.get('projectDescription') or '').strip():
-            pd2 = (
-                _accela_table_row_labeled(soup_app, 'project description')
-                or _extract_labeled_multiline(soup_app, 'Project Description')
-                or _get_field_from_soup(soup_app, 'Project Description')
-            )
-            if pd2:
-                lead['projectDescription'] = pd2
-                if not (lead.get('description') or '').strip():
-                    lead['description'] = pd2
     else:
         if project_desc_clean:
             # First line is often the homeowner (e.g. "TIMOTHY ANGLIN" then scope text)
@@ -1787,15 +1858,17 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     _infer_pds_fields_from_narrative(lead)
     _sync_address_zip_for_ingest(lead)
 
+    ji = (lead.get('jobInfo') or '').replace('\n', ' | ')
     log.info(
-        f'  jobValue={lead.get("jobValue","?")} | size={lead.get("systemSize","?")} | '
+        f'  jobValue={lead.get("jobValue","?")} | jobInfo={ji[:100] or "—"} | '
+        f'size={lead.get("systemSize","?")} | '
         f'elec={lead.get("electricalServiceUpgrade","?")} | ess={lead.get("advancedEnergyStorage","?")} | '
         f'owner={lead.get("homeownerFirstName","")} {lead.get("homeownerLastName","")}'
     )
 
 
 def _set_defaults(lead):
-    for field in ['jobValue', 'subType', 'occupancyType', 'numberOfPanels',
+    for field in ['jobValue', 'jobInfo', 'subType', 'occupancyType', 'numberOfPanels',
                   'licensedProfessional', 'systemSize', 'projectDescription',
                   'ownerOnApplication', 'homeownerEmail', 'homeownerPhone',
                   'ownerMailingAddress', 'electricalServiceUpgrade',

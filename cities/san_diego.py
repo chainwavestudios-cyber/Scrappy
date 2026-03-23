@@ -2,10 +2,11 @@
 
 Search/detail keys: see cities/__init__.py (ACCELA_CITY_CONFIG_KEYS).
 
-Detail flow (portal_pds_iframe): expand Record via More Details (PermitDetailList1),
-then parse Licensed Professional + Project Description <td> rows; Contacts for
-Owner on Application; back to Record → Application Information (lblASIList) for
-kW / Electrical Service Upgrade / ESS.
+Detail flow (portal_pds_iframe): Record More Details → Licensed Professional +
+Project Description <td> rows; expand Contacts (h1 / “Expand Contacts”) → More
+Details in panel → Owner on Application (name/email/phone; address stays from CSV);
+expand Application Information (h1 / lblASIList) → build jobInfo (kW, electrical,
+ESS) for Base44. CSV: short_notes_filter 8002/8004, address + permit # + status + date.
 """
 
 CONFIGS = {

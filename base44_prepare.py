@@ -47,6 +47,9 @@ def prepare_leads_for_base44(leads: list[dict[str, Any]]) -> list[dict[str, Any]
     only when present; missing contact after parse rules is fine — omit aliases.
     Clears numberOfPanels unless scraper set _panels_from_app_info.
     Empty jobValue → None.
+    Supplemental Application Information is consolidated in jobInfo; when jobInfo is
+    set, drops systemSize / electricalServiceUpgrade / advancedEnergyStorage so Base44
+    only needs one entity field. Drops accelaCsv (large internal blob).
     """
     out: list[dict[str, Any]] = []
     for raw in leads or []:
@@ -54,6 +57,8 @@ def prepare_leads_for_base44(leads: list[dict[str, Any]]) -> list[dict[str, Any]
         d: dict[str, Any] = {
             k: v for k, v in raw.items() if not str(k).startswith('_')
         }
+
+        d.pop('accelaCsv', None)
 
         addr = (d.get('address') or d.get('siteAddress') or '').strip()
         if not addr:
@@ -91,6 +96,11 @@ def prepare_leads_for_base44(leads: list[dict[str, Any]]) -> list[dict[str, Any]
 
         if not panels_ok or not (d.get('numberOfPanels') or '').strip():
             d.pop('numberOfPanels', None)
+
+        if (d.get('jobInfo') or '').strip():
+            d.pop('systemSize', None)
+            d.pop('electricalServiceUpgrade', None)
+            d.pop('advancedEnergyStorage', None)
 
         out.append(d)
     return out
