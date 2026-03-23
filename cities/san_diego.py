@@ -1,6 +1,11 @@
 """San Diego County — different portal, same Accela engine.
 
 Search/detail keys: see cities/__init__.py (ACCELA_CITY_CONFIG_KEYS).
+
+Detail flow (portal_pds_iframe): expand Record via More Details (PermitDetailList1),
+then parse Licensed Professional + Project Description <td> rows; Contacts for
+Owner on Application; back to Record → Application Information (lblASIList) for
+kW / Electrical Service Upgrade / ESS.
 """
 
 CONFIGS = {

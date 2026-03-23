@@ -1117,6 +1117,45 @@ def _extract_work_location_accela(soup):
     return ''
 
 
+def _accela_table_row_labeled(soup, label_lc: str) -> str:
+    """
+    Accela PermitDetailList rows: <tr><td>Label</td><td>…multiline value…</td></tr>
+    Used for San Diego PDS Licensed Professional + Project Description on Record Details.
+    """
+    label_lc = (label_lc or '').lower().strip()
+    if not label_lc:
+        return ''
+    for tr in soup.find_all('tr'):
+        cells = tr.find_all(['td', 'th'])
+        if len(cells) < 2:
+            continue
+        lab = cells[0].get_text(separator=' ', strip=True).lower().rstrip(':').strip()
+        if lab == label_lc or (lab.startswith(label_lc) and len(lab) <= len(label_lc) + 4):
+            val = cells[1].get_text(separator='\n', strip=True)
+            val = re.sub(r'\n{3,}', '\n\n', val).strip()
+            if val and val.lower() != label_lc:
+                return val
+    return ''
+
+
+def _infer_pds_fields_from_narrative(lead: dict) -> None:
+    """Fill Cross Street / Electrical upgrade hints from OTC project narrative when labels are empty."""
+    blob = f"{lead.get('projectDescription') or ''}\n{lead.get('description') or ''}"
+    if not blob.strip():
+        return
+    if not (lead.get('crossStreet') or '').strip():
+        m = re.search(
+            r'CROSS\s+STREET\s*:?\s*([^\n]+?)(?:\s+Description\s+of\s+Work|\s*$)',
+            blob,
+            re.I,
+        )
+        if m:
+            lead['crossStreet'] = m.group(1).strip()
+    if not (lead.get('electricalServiceUpgrade') or '').strip():
+        if re.search(r'\(?\s*no\s+meter\s+upgrade\s*\)?', blob, re.I):
+            lead['electricalServiceUpgrade'] = 'No'
+
+
 def _extract_job_value_accela(soup):
     """
     Chula Vista: More Details → Additional Information → Job Value($): $45,000.00
@@ -1370,6 +1409,46 @@ async def _click_more_details_visible(detail_page):
     await detail_page.wait_for_timeout(1800)
 
 
+async def _pds_expand_record_more_details(detail_page) -> None:
+    """
+    San Diego County PDS / Accela: expand Record Details hidden rows so Licensed
+    Professional + Project Description <td> values are in the DOM.
+    Prefer stable control IDs; fall back to exact 'More Details' text.
+    """
+    await detail_page.evaluate("""
+        () => {
+            const byId = document.getElementById('ctl00_PlaceHolderMain_PermitDetailList1_lblMoreDetail')
+                || document.querySelector('[id$="PermitDetailList1_lblMoreDetail"]');
+            if (byId) { byId.click(); return; }
+            const links = Array.from(document.querySelectorAll('a, span, button'));
+            const more = links.find(l => (l.textContent || '').trim() === 'More Details');
+            if (more) more.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(1800)
+
+
+async def _pds_click_application_information(detail_page) -> None:
+    """Open Application Information (kW, Electrical Service Upgrade, ESS, etc.)."""
+    await detail_page.evaluate("""
+        () => {
+            const byId = document.getElementById('ctl00_PlaceHolderMain_PermitDetailList1_lblASIList')
+                || document.querySelector('[id$="PermitDetailList1_lblASIList"]');
+            if (byId) { byId.click(); return; }
+            const els = Array.from(document.querySelectorAll('a, span, button'));
+            const ai = els.find(l => (l.textContent || '').trim() === 'Application Information');
+            if (ai) ai.click();
+        }
+    """)
+    await detail_page.wait_for_timeout(2000)
+
+
+async def _pds_expand_record_then_application_info(detail_page) -> None:
+    """PDS sequence from portal QA: More Details → Application Information (not Additional Information first)."""
+    await _pds_expand_record_more_details(detail_page)
+    await _pds_click_application_information(detail_page)
+
+
 async def _expand_accela_detail_sections(detail_page):
     """Expand More Details → Additional Information → Application Information."""
     await detail_page.evaluate("""
@@ -1436,9 +1515,12 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     await detail_page.wait_for_timeout(2000)
 
     owner_fc = bool(lead.get('_owner_from_contacts'))
-    # San Diego PDS: Record Details (LP + Project Description) is visible first; expand
-    # Application Information only after Contacts → More Details → owner.
-    if not owner_fc:
+    pds = bool(cfg.get('portal_pds_iframe'))
+    # PDS + owner_from_contacts: expand Record "More Details" first so Licensed
+    # Professional + Project Description <td> cells exist before first parse.
+    if owner_fc and pds:
+        await _pds_expand_record_more_details(detail_page)
+    elif not owner_fc:
         await _expand_accela_detail_sections(detail_page)
 
     html = await detail_page.content()
@@ -1500,26 +1582,23 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     lead['jobValue'] = job_value
 
     # ---------------------------------------------------------------------------
-    # Licensed Professional — grab the entire section block
-    # Full block includes: company name, address, phone, license number
+    # Licensed Professional — PDS: one <td> with name, address, phone, CSLB # (table row)
     # ---------------------------------------------------------------------------
-    lp_text = ''
-    for el in soup.find_all(['span', 'td', 'div', 'th', 'h2', 'h3']):
-        if 'licensed professional' in el.get_text(strip=True).lower():
-            # Walk up to containing section/panel
-            container = el.find_parent(['div', 'table', 'section', 'fieldset'])
-            if container:
-                # Grab all text from the container, skip the header itself
-                parts = []
-                for child in container.find_all(['span', 'td', 'div', 'label', 'p']):
-                    t = child.get_text(strip=True)
-                    if t and t.lower() not in ('licensed professional', ''):
-                        parts.append(t)
-                if parts:
-                    lp_text = ' | '.join(dict.fromkeys(parts))  # deduplicate while preserving order
-                    break
+    lp_text = _accela_table_row_labeled(soup, 'licensed professional')
+    if not lp_text:
+        for el in soup.find_all(['span', 'td', 'div', 'th', 'h2', 'h3']):
+            if 'licensed professional' in el.get_text(strip=True).lower():
+                container = el.find_parent(['div', 'table', 'section', 'fieldset'])
+                if container:
+                    parts = []
+                    for child in container.find_all(['span', 'td', 'div', 'label', 'p']):
+                        t = child.get_text(strip=True)
+                        if t and t.lower() not in ('licensed professional', ''):
+                            parts.append(t)
+                    if parts:
+                        lp_text = ' | '.join(dict.fromkeys(parts))
+                        break
 
-    # Fallback: just grab the next sibling block
     if not lp_text:
         for el in soup.find_all(['span', 'td', 'div', 'th']):
             if 'licensed professional' in el.get_text().lower():
@@ -1552,11 +1631,10 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         else:
             lead['siteAddress'] = work_loc
 
-    # Project Description — full multiline text → projectDescription (Base44). Homeowner
-    # name is parsed separately into homeownerFirstName/LastName; we never strip the name
-    # from projectDescription (entire block stays in one field).
+    # Project Description — PDS: multiline in adjacent <td>; keep full narrative for Base44.
     project_desc_clean = (
-        _extract_labeled_multiline(soup, 'Project Description')
+        _accela_table_row_labeled(soup, 'project description')
+        or _extract_labeled_multiline(soup, 'Project Description')
         or get_field('Project Description')
     )
     if project_desc_clean:
@@ -1594,10 +1672,13 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         soup2 = BeautifulSoup(html2, 'lxml')
         _parse_owner_contacts_soup(soup2, lead)
 
-        # Contacts tab swaps the DOM — old soup is stale. Return to record view,
-        # re-open Application Information, then read kW / Electrical / ESS (etc.).
+        # Contacts tab swaps the DOM — old soup is stale. Return to Record Details,
+        # then PDS: More Details → Application Information (portal QA IDs), else Accela chain.
         await _click_record_details_tab(detail_page)
-        await _expand_accela_detail_sections(detail_page)
+        if pds:
+            await _pds_expand_record_then_application_info(detail_page)
+        else:
+            await _expand_accela_detail_sections(detail_page)
         html_app = await detail_page.content()
         soup_app = BeautifulSoup(html_app, 'lxml')
 
@@ -1650,10 +1731,15 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
         if (pan or '').strip():
             lead['numberOfPanels'] = pan.strip()
             lead['_panels_from_app_info'] = True
-        # First pass skipped expand — full Project Description text after expand (multiline)
+        if not (lead.get('licensedProfessional') or '').strip():
+            lpa = _accela_table_row_labeled(soup_app, 'licensed professional')
+            if lpa:
+                lead['licensedProfessional'] = lpa
+
         if not (lead.get('projectDescription') or '').strip():
             pd2 = (
-                _extract_labeled_multiline(soup_app, 'Project Description')
+                _accela_table_row_labeled(soup_app, 'project description')
+                or _extract_labeled_multiline(soup_app, 'Project Description')
                 or _get_field_from_soup(soup_app, 'Project Description')
             )
             if pd2:
@@ -1698,6 +1784,7 @@ async def _get_permit_details(detail_page, base_url, module, permit_num, lead, c
     if cfg.get('parse_owner_on_application') and not cfg.get('owner_from_contacts'):
         await _try_parse_owner_from_contacts_tab(detail_page, lead)
 
+    _infer_pds_fields_from_narrative(lead)
     _sync_address_zip_for_ingest(lead)
 
     log.info(
