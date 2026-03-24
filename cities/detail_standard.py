@@ -18,7 +18,12 @@ from accela_detail_primitives import (
     resolve_permit_url_from_href,
     sync_address_zip_for_ingest,
 )
-from accela_detail_ui import expand_accela_detail_sections, try_parse_owner_from_contacts_tab
+from accela_detail_ui import (
+    expand_accela_detail_sections,
+    resolve_accela_ui_context,
+    try_parse_owner_from_contacts_tab,
+    wait_accela_detail_dom,
+)
 
 
 async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, cfg, log):
@@ -27,11 +32,16 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     log.info(f'  → {detail_url}')
 
     await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=20000)
-    await detail_page.wait_for_timeout(2000)
+    try:
+        await detail_page.wait_for_load_state('networkidle', timeout=15000)
+    except Exception:
+        pass
+    ctx = await wait_accela_detail_dom(detail_page, log)
 
-    await expand_accela_detail_sections(detail_page)
+    await expand_accela_detail_sections(ctx)
 
-    html = await detail_page.content()
+    ctx = await resolve_accela_ui_context(detail_page, log)
+    html = await ctx.content()
     soup = BeautifulSoup(html, 'lxml')
 
     if cfg.get('require_primary_scope_contains') and not primary_scope_allowed(soup, cfg):

@@ -7,7 +7,7 @@ import csv
 import re
 
 from accela_name_utils import extract_homeowner_name, parse_system_size
-from accela_detail_primitives import resolve_permit_url_from_href
+from accela_detail_primitives import resolve_permit_url_from_href, zip_from_address_line
 from cities.detail_registry import get_detail_fetcher
 
 import json
@@ -216,23 +216,6 @@ def _accela_csv_row_raw(row: dict) -> dict:
     return out
 
 
-def _zip_from_address_line(address: str) -> str:
-    """
-    Prefer explicit CA + ZIP (avoids using a 5-digit street number as zipCode).
-    Fallback: 5 digits at end of line (..., 92101).
-    """
-    if not address:
-        return ''
-    s = address.strip()
-    m = re.search(r'(?:,\s*)?(?:CA|California)\s+(\d{5})(?:-\d{4})?\b', s, re.I)
-    if m:
-        return m.group(1)
-    m2 = re.search(r'\b(\d{5})(?:-\d{4})?\s*$', s)
-    if m2:
-        return m2.group(1)
-    return ''
-
-
 def _csv_description_fallback(
     description: str, permit_type: str, project_name: str, short_notes: str
 ) -> str:
@@ -297,7 +280,7 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
             )
 
             address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
-            zip_code = _zip_from_address_line(address)
+            zip_code = zip_from_address_line(address)
 
             owner_first, owner_last = extract_homeowner_name(description, project_name)
             system_size = parse_system_size(description) or parse_system_size(project_name)
@@ -850,7 +833,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
             else:
                 address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
 
-            zip_code = _zip_from_address_line(address)
+            zip_code = zip_from_address_line(address)
 
             owner_first, owner_last = extract_homeowner_name(description, project_name)
 

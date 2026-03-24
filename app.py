@@ -140,9 +140,9 @@ def disable_compression(response):
 def get_scraper(city: str):
     city = city.lower().replace(' ', '_').replace('-', '_')
 
+    # Legacy UI keys / shortcuts → cities/*.py CONFIGS keys (all use scraper_accela + detail_registry)
     if city in ('san_diego', 'sandiego'):
-        from scraper import scrape_permits
-        return scrape_permits, {}
+        city = 'san_diego_residential'
 
     if city in ('los_angeles', 'la', 'losangeles'):
         raise NotImplementedError('Los Angeles scraper not yet built')
@@ -152,8 +152,8 @@ def get_scraper(city: str):
         return scrape_accela, {'city_key': city}
 
     raise ValueError(f'Unknown city: {city}. '
-                     f'Available: san_diego, los_angeles, '
-                     f'{", ".join(CITY_CONFIGS.keys())}')
+                     f'Available: san_diego, san_diego_residential, san_diego_commercial, los_angeles, '
+                     f'{", ".join(sorted(CITY_CONFIGS.keys()))}')
 
 
 def run_and_post(city, start_date, end_date, campaign_id=None, organization_id=None):

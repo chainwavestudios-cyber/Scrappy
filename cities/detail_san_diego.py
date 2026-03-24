@@ -27,6 +27,8 @@ from accela_detail_ui import (
     pds_expand_application_information_heading,
     pds_expand_contacts_heading,
     pds_expand_record_more_details,
+    resolve_accela_ui_context,
+    wait_accela_detail_dom,
 )
 
 
@@ -40,11 +42,16 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     log.info(f'  → {detail_url}')
 
     await detail_page.goto(detail_url, wait_until='domcontentloaded', timeout=20000)
-    await detail_page.wait_for_timeout(2000)
+    try:
+        await detail_page.wait_for_load_state('networkidle', timeout=18000)
+    except Exception:
+        pass
+    ctx = await wait_accela_detail_dom(detail_page, log)
 
-    await pds_expand_record_more_details(detail_page)
+    await pds_expand_record_more_details(ctx)
 
-    html = await detail_page.content()
+    ctx = await resolve_accela_ui_context(detail_page, log)
+    html = await ctx.content()
     soup = BeautifulSoup(html, 'lxml')
 
     if cfg.get('require_primary_scope_contains') and not primary_scope_allowed(soup, cfg):
@@ -108,14 +115,16 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
         if not (lead.get('description') or '').strip():
             lead['description'] = project_desc_clean
 
-    await pds_expand_contacts_heading(detail_page)
-    await click_more_details_visible(detail_page)
-    html2 = await detail_page.content()
+    await pds_expand_contacts_heading(ctx)
+    await click_more_details_visible(ctx)
+    ctx = await resolve_accela_ui_context(detail_page, log)
+    html2 = await ctx.content()
     soup2 = BeautifulSoup(html2, 'lxml')
     parse_owner_contacts_soup(soup2, lead)
 
-    await pds_expand_application_information_heading(detail_page)
-    html_app = await detail_page.content()
+    await pds_expand_application_information_heading(ctx)
+    ctx = await resolve_accela_ui_context(detail_page, log)
+    html_app = await ctx.content()
     soup_app = BeautifulSoup(html_app, 'lxml')
 
     jv_app = extract_job_value_accela(soup_app)
@@ -195,9 +204,11 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     sync_address_zip_for_ingest(lead)
 
     ji = (lead.get('jobInfo') or '').replace('\n', ' | ')
+    desc_prev = ((lead.get('description') or '')[:100] + '…') if len(lead.get('description') or '') > 100 else (lead.get('description') or '')
     log.info(
         f'  jobValue={lead.get("jobValue","?")} | jobInfo={ji[:100] or "—"} | '
         f'size={lead.get("systemSize","?")} | '
         f'elec={lead.get("electricalServiceUpgrade","?")} | ess={lead.get("advancedEnergyStorage","?")} | '
-        f'owner={lead.get("homeownerFirstName","")} {lead.get("homeownerLastName","")}'
+        f'owner={lead.get("homeownerFirstName","")} {lead.get("homeownerLastName","")} | '
+        f'desc={desc_prev or "—"}'
     )

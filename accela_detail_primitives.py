@@ -282,6 +282,23 @@ def extract_job_value_with_valuation_fallback(soup):
     return clean_accela_job_value(job_value or '')
 
 
+def zip_from_address_line(address: str) -> str:
+    """
+    Prefer explicit CA + ZIP (avoid 5-digit street numbers as zipCode).
+    Fallback: 5 digits at end of line.
+    """
+    if not address:
+        return ''
+    s = address.strip()
+    m = re.search(r'(?:,\s*)?(?:CA|California)\s+(\d{5})(?:-\d{4})?\b', s, re.I)
+    if m:
+        return m.group(1)
+    m2 = re.search(r'\b(\d{5})(?:-\d{4})?\s*$', s)
+    if m2:
+        return m2.group(1)
+    return ''
+
+
 def sync_address_zip_for_ingest(lead):
     loc = (lead.get('siteAddress') or lead.get('address') or '').strip()
     if not loc:
@@ -289,11 +306,11 @@ def sync_address_zip_for_ingest(lead):
     single = re.sub(r'\s+', ' ', loc.replace('\n', ' ')).strip()
     lead['siteAddress'] = single
     lead['address'] = single
-    zm = re.search(r'\b(\d{5})(?:-\d{4})?\b', single)
-    if zm:
-        z = lead.get('zipCode') or ''
-        if not (str(z).strip()):
-            lead['zipCode'] = zm.group(1)
+    z = lead.get('zipCode') or ''
+    if not (str(z).strip()):
+        zc = zip_from_address_line(single)
+        if zc:
+            lead['zipCode'] = zc
 
 
 def resolve_permit_url_from_href(base_url: str, permit_num: str, module: str, lead: dict) -> None:
