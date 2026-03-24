@@ -24,6 +24,22 @@ async def _sleep_ctx(ctx: UiContext, ms: int) -> None:
         await ctx.page.wait_for_timeout(ms)
 
 
+async def _try_click_by_title(ctx: UiContext, *titles: str) -> bool:
+    """Prefer real Accela expand controls (title=) over generic text scans."""
+    for tit in titles:
+        if not tit:
+            continue
+        try:
+            loc = ctx.get_by_title(tit)
+            if await loc.count() > 0:
+                await loc.first.click(timeout=8000)
+                await _sleep_ctx(ctx, 500)
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def resolve_accela_ui_context(page: Page, log=None) -> UiContext:
     """
     Return the frame whose DOM actually contains Accela Cap (PlaceHolderMain).
@@ -66,10 +82,40 @@ async def resolve_accela_ui_context(page: Page, log=None) -> UiContext:
     return best
 
 
+async def resolve_cap_detail_content_frame(page: Page, log=None) -> UiContext:
+    """
+    For county PDS CapDetail, real markup is almost always in iframe[name=ACAFrame].
+    Use this for soup snapshots so we do not fall back to a fat outer shell after expands.
+    """
+    for fr in list(page.frames):
+        nm = (getattr(fr, 'name', None) or '').strip().lower()
+        if nm == 'acaframe':
+            try:
+                h = await fr.content()
+                if h and len(h) > 4000 and 'placeholdermain' in h.lower():
+                    return fr
+            except Exception:
+                pass
+    return await resolve_accela_ui_context(page, log)
+
+
 async def wait_accela_detail_dom(page: Page, log=None, attempts: int = 18) -> UiContext:
     """Poll until Accela shell appears in main or child frame (async iframe load)."""
     ctx: Optional[Frame] = None
     for i in range(attempts):
+        # San Diego PDS: CapDetail lives in iframe[name="ACAFrame"] — prefer it over a fat shell.
+        for fr in list(page.frames):
+            nm = (getattr(fr, 'name', None) or '').strip().lower()
+            if nm == 'acaframe':
+                try:
+                    h = await fr.content()
+                    if h and len(h) > 5500 and 'placeholdermain' in h.lower():
+                        if log is not None and i == 0:
+                            log.info('  CapDetail: using iframe[name=ACAFrame]')
+                        return fr
+                except Exception:
+                    pass
+
         ctx = await resolve_accela_ui_context(page, log if i == attempts - 1 else None)
         try:
             h = await ctx.content()
@@ -94,6 +140,14 @@ async def click_more_details_visible(ctx: UiContext):
 
 
 async def pds_expand_record_more_details(ctx: UiContext) -> None:
+    try:
+        more = ctx.get_by_text('More Details', exact=True)
+        if await more.count() > 0:
+            await more.first.click(timeout=8000)
+            await _sleep_ctx(ctx, 1800)
+            return
+    except Exception:
+        pass
     await ctx.evaluate("""
         () => {
             const byId = document.getElementById('ctl00_PlaceHolderMain_PermitDetailList1_lblMoreDetail')
@@ -108,6 +162,9 @@ async def pds_expand_record_more_details(ctx: UiContext) -> None:
 
 
 async def pds_expand_contacts_heading(ctx: UiContext) -> None:
+    if await _try_click_by_title(ctx, 'Expand Contacts'):
+        await _sleep_ctx(ctx, 1700)
+        return
     await ctx.evaluate("""
         () => {
             const heads = Array.from(document.querySelectorAll('h1, h2, [role="heading"]'));
@@ -130,6 +187,9 @@ async def pds_expand_contacts_heading(ctx: UiContext) -> None:
 
 
 async def pds_expand_application_information_heading(ctx: UiContext) -> None:
+    if await _try_click_by_title(ctx, 'Expand Application Information'):
+        await _sleep_ctx(ctx, 2000)
+        return
     await ctx.evaluate("""
         () => {
             const heads = Array.from(document.querySelectorAll('h1, h2, [role="heading"]'));

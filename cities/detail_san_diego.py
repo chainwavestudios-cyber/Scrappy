@@ -10,6 +10,7 @@ from bs4 import BeautifulSoup
 from accela_detail_primitives import (
     accela_field_first_nonempty,
     accela_table_row_labeled,
+    accela_td_value_after_label_contains,
     build_job_info_text,
     extract_job_value_accela,
     extract_job_value_with_valuation_fallback,
@@ -27,7 +28,7 @@ from accela_detail_ui import (
     pds_expand_application_information_heading,
     pds_expand_contacts_heading,
     pds_expand_record_more_details,
-    resolve_accela_ui_context,
+    resolve_cap_detail_content_frame,
     wait_accela_detail_dom,
 )
 
@@ -49,8 +50,9 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     ctx = await wait_accela_detail_dom(detail_page, log)
 
     await pds_expand_record_more_details(ctx)
+    ctx = await wait_accela_detail_dom(detail_page, log=None)
 
-    ctx = await resolve_accela_ui_context(detail_page, log)
+    ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html = await ctx.content()
     soup = BeautifulSoup(html, 'lxml')
 
@@ -117,13 +119,15 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
 
     await pds_expand_contacts_heading(ctx)
     await click_more_details_visible(ctx)
-    ctx = await resolve_accela_ui_context(detail_page, log)
+    ctx = await wait_accela_detail_dom(detail_page, log=None)
+    ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html2 = await ctx.content()
     soup2 = BeautifulSoup(html2, 'lxml')
     parse_owner_contacts_soup(soup2, lead)
 
     await pds_expand_application_information_heading(ctx)
-    ctx = await resolve_accela_ui_context(detail_page, log)
+    ctx = await wait_accela_detail_dom(detail_page, log=None)
+    ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html_app = await ctx.content()
     soup_app = BeautifulSoup(html_app, 'lxml')
 
@@ -149,23 +153,44 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
 
     kwh = accela_field_first_nonempty(
         soup_app,
+        'Rounded Kilowatts Total',
         'Rounded Kilowatts Total System Size',
         'DC System Size',
         'System Size',
         'Total System Size in Kilowatts',
     )
+    if not (kwh or '').strip():
+        kwh = (
+            accela_td_value_after_label_contains(soup_app, 'rounded kilowatt')
+            or accela_td_value_after_label_contains(soup_app, 'kilowatt total')
+            or accela_td_value_after_label_contains(soup_app, 'dc system size')
+        )
+
     elec = accela_field_first_nonempty(
         soup_app,
         'Electrical Service Upgrade',
         'Electrical Upgrade',
         'Service Upgrade',
     )
+    if not (elec or '').strip():
+        elec = (
+            accela_td_value_after_label_contains(soup_app, 'electrical service upgrade')
+            or accela_td_value_after_label_contains(soup_app, 'meter upgrade')
+            or accela_td_value_after_label_contains(soup_app, 'service upgrade')
+        )
+
     ess = accela_field_first_nonempty(
         soup_app,
         'Advanced Energy Storage System',
+        'Advanced Energy Storage',
         'Energy Storage System',
         'Battery Energy Storage',
     )
+    if not (ess or '').strip():
+        ess = (
+            accela_td_value_after_label_contains(soup_app, 'advanced energy storage')
+            or accela_td_value_after_label_contains(soup_app, 'energy storage system')
+        )
     if not (elec or '').strip():
         narr = f"{lead.get('projectDescription') or ''}\n{lead.get('description') or ''}"
         if re.search(r'\(?\s*no\s+meter\s+upgrade\s*\)?', narr, re.I):

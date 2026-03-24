@@ -164,6 +164,26 @@ def accela_table_row_labeled(soup, label_lc: str) -> str:
     return ''
 
 
+def accela_td_value_after_label_contains(soup, needle: str) -> str:
+    """
+    First <tr> whose first cell contains `needle` (case-insensitive) → second cell text.
+    San Diego PDS uses long labels like 'Rounded Kilowatts Total' / 'Electrical Service Upgrade:'.
+    """
+    n = (needle or '').lower().strip()
+    if not n:
+        return ''
+    for tr in soup.find_all('tr'):
+        cells = tr.find_all(['td', 'th'])
+        if len(cells) < 2:
+            continue
+        lab = cells[0].get_text(separator=' ', strip=True).lower().rstrip(':').strip()
+        if n in lab:
+            val = cells[1].get_text(separator=' ', strip=True).strip()
+            if val and val.lower() != lab and not val.lower().startswith('select'):
+                return val
+    return ''
+
+
 def build_job_info_text(kwh: str, elec: str, ess: str) -> str:
     lines = []
     kk = (kwh or '').strip()
