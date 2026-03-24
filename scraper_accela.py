@@ -835,7 +835,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 address = raw_address.strip()
             else:
                 # Only strip trailing 5-digit ZIP, not all trailing digits (avoids eating street numbers)
-            address = re.sub(r',?\s*\b\d{5}(?:-\d{4})?\s*$', '', raw_address).strip().rstrip(',').strip()
+                address = re.sub(r',?\s*\b\d{5}(?:-\d{4})?\s*$', '', raw_address).strip().rstrip(',').strip()
 
             zip_code = zip_from_address_line(address)
 
