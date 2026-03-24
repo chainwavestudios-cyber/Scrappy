@@ -32,6 +32,15 @@ Source / ingest prep
 
 Base44 normalization (app.py → base44_prepare.prepare_leads_for_base44) runs after
 scrape; it does not duplicate these keys but uses scraped address / owner fields.
+
+Permit detail (CapDetail) — one module per city when needed
+--------------------------------------------------------------------
+`scraper_accela._get_permit_details` dispatches via `cities/detail_registry.py`:
+`get_detail_fetcher(city_key)` → `cities/detail_<name>.py` `fetch_permit_detail`, or
+`detail_standard.fetch_permit_detail` as default. Shared parsers live in
+`accela_detail_primitives.py`; Playwright clicks in `accela_detail_ui.py`.
+`scrape_accela()` injects `_city_key` into the config dict for the registry.
+Detail modules (`detail_*.py`) are not city CONFIG files — they have no `CONFIGS` dict.
 """
 import importlib
 import logging
@@ -54,6 +63,8 @@ def _load_all_configs():
 
     for importer, modname, ispkg in pkgutil.iter_modules(package.__path__):
         if modname.startswith('_'):
+            continue
+        if modname.startswith('detail_') or modname == 'detail_registry':
             continue
         try:
             module = importlib.import_module(f'{__name__}.{modname}')
