@@ -216,6 +216,43 @@ def _accela_csv_row_raw(row: dict) -> dict:
     return out
 
 
+def _zip_from_address_line(address: str) -> str:
+    """
+    Prefer explicit CA + ZIP (avoids using a 5-digit street number as zipCode).
+    Fallback: 5 digits at end of line (..., 92101).
+    """
+    if not address:
+        return ''
+    s = address.strip()
+    m = re.search(r'(?:,\s*)?(?:CA|California)\s+(\d{5})(?:-\d{4})?\b', s, re.I)
+    if m:
+        return m.group(1)
+    m2 = re.search(r'\b(\d{5})(?:-\d{4})?\s*$', s)
+    if m2:
+        return m2.group(1)
+    return ''
+
+
+def _csv_description_fallback(
+    description: str, permit_type: str, project_name: str, short_notes: str
+) -> str:
+    """
+    Many Accela exports (e.g. San Diego PDS) omit Permit Description; narrative
+    is in Record Type + Project Name + Short Notes. Merge so Base44/UI/search
+    get text even when CapDetail enrichment fails.
+    """
+    if (description or '').strip():
+        return description.strip()
+    parts = []
+    if (permit_type or '').strip():
+        parts.append(permit_type.strip())
+    if (project_name or '').strip():
+        parts.append(project_name.strip())
+    if (short_notes or '').strip():
+        parts.append(short_notes.strip())
+    return ' | '.join(parts) if parts else ''
+
+
 def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                                 base_url: str, module: str) -> list:
     """
@@ -255,9 +292,12 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                 log.info(f'  CSV skip (filter): {(description or permit_num)[:60]}')
                 continue
 
+            description = _csv_description_fallback(
+                description, permit_type, project_name, short_notes
+            )
+
             address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
-            zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', address)
-            zip_code = zip_match.group(1) if zip_match else ''
+            zip_code = _zip_from_address_line(address)
 
             owner_first, owner_last = extract_homeowner_name(description, project_name)
             system_size = parse_system_size(description) or parse_system_size(project_name)
@@ -799,6 +839,10 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 continue
 
             project_name = raw_cells[col_project_name] if col_project_name is not None and len(raw_cells) > col_project_name else ''
+            permit_type = raw_cells[col_permit_type] if len(raw_cells) > col_permit_type else ''
+            description = _csv_description_fallback(
+                description, permit_type, project_name, short_notes
+            )
 
             raw_address = raw_cells[col_address] if len(raw_cells) > col_address else ''
             if cfg.get('skip_address_apn_strip'):
@@ -806,8 +850,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
             else:
                 address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
 
-            zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', address)
-            zip_code = zip_match.group(1) if zip_match else ''
+            zip_code = _zip_from_address_line(address)
 
             owner_first, owner_last = extract_homeowner_name(description, project_name)
 
@@ -835,7 +878,7 @@ async def _scrape_rows(page, source, base_url, module, config=None):
                 'occupancyType':        '',
                 'licensedProfessional': '',
                 'projectName':          project_name,
-                'permitType':           raw_cells[col_permit_type] if len(raw_cells) > col_permit_type else '',
+                'permitType':           permit_type,
                 'leadCategory':         lead_category,
                 'source':               source,
                 'enrichmentStage':      'scraped',
