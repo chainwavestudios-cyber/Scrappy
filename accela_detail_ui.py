@@ -154,8 +154,12 @@ async def resolve_cap_detail_content_frame(page: Page, log=None) -> UiContext:
     return await resolve_accela_ui_context(page, log)
 
 
-async def wait_accela_detail_dom(page: Page, log=None, attempts: int = 18) -> UiContext:
-    """Poll until Accela shell appears in main or child frame (async iframe load)."""
+async def wait_accela_detail_dom(page: Page, log=None, attempts: int = 30) -> UiContext:
+    """Poll until Accela shell appears in main or child frame (async iframe load).
+
+    SD PDS CapDetail pages load the outer shell instantly but ACAFrame content
+    arrives via async XHR — can take 3-8 seconds. Poll up to 30x500ms = 15s.
+    """
     ctx: Optional[Frame] = None
     for i in range(attempts):
         # San Diego PDS: CapDetail lives in iframe[name="ACAFrame"] — prefer it over a fat shell.
@@ -165,8 +169,8 @@ async def wait_accela_detail_dom(page: Page, log=None, attempts: int = 18) -> Ui
                 try:
                     h = await fr.content()
                     if h and len(h) > 5500 and 'placeholdermain' in h.lower():
-                        if log is not None and i == 0:
-                            log.info('  CapDetail: using iframe[name=ACAFrame]')
+                        if log is not None:
+                            log.info(f'  CapDetail: using iframe[name=ACAFrame] (attempt {i+1})')
                         return fr
                 except Exception:
                     pass
@@ -179,6 +183,9 @@ async def wait_accela_detail_dom(page: Page, log=None, attempts: int = 18) -> Ui
         except Exception:
             pass
         await page.wait_for_timeout(500)
+
+    if log is not None:
+        log.warning(f'  wait_accela_detail_dom: content frame not found after {attempts} attempts')
     return ctx or page.main_frame
 
 

@@ -279,7 +279,8 @@ def _leads_from_accela_csv_path(path: str, config: dict, source: str,
                 description, permit_type, project_name, short_notes
             )
 
-            address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
+            # Only strip trailing 5-digit ZIP, not all trailing digits (avoids eating street numbers)
+            address = re.sub(r',?\s*\b\d{5}(?:-\d{4})?\s*$', '', raw_address).strip().rstrip(',').strip()
             zip_code = zip_from_address_line(address)
 
             owner_first, owner_last = extract_homeowner_name(description, project_name)
@@ -833,7 +834,8 @@ async def _scrape_rows(page, source, base_url, module, config=None):
             if cfg.get('skip_address_apn_strip'):
                 address = raw_address.strip()
             else:
-                address = re.sub(r',?\s*\d+\s*\d*\s*$', '', raw_address).strip().rstrip(',').strip()
+                # Only strip trailing 5-digit ZIP, not all trailing digits (avoids eating street numbers)
+            address = re.sub(r',?\s*\b\d{5}(?:-\d{4})?\s*$', '', raw_address).strip().rstrip(',').strip()
 
             zip_code = zip_from_address_line(address)
 
