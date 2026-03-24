@@ -82,11 +82,66 @@ async def resolve_accela_ui_context(page: Page, log=None) -> UiContext:
     return best
 
 
+def _score_cap_detail_html(html: str) -> int:
+    """Pick the frame that actually holds Accela CapDetail panels (may be nested under ACAFrame)."""
+    if not html or len(html) < 3500:
+        return -1
+    low = html.lower()
+    head = low[:14000]
+    if 'type="password"' in head and 'login' in head:
+        return -1
+    s = 0
+    if 'placeholdermain' in low:
+        s += 18
+    if 'capdetail' in low or 'permitdetaillist' in low:
+        s += 28
+    if 'permit detail' in low:
+        s += 8
+    if 'application information' in low:
+        s += 14
+    if 'expand application' in low:
+        s += 6
+    if 'expand contacts' in low:
+        s += 6
+    if 'rounded kilowatt' in low or 'kilowatts total' in low:
+        s += 16
+    if 'owner on application' in low:
+        s += 14
+    if 'electrical service upgrade' in low or 'advanced energy storage' in low:
+        s += 10
+    if 'licensed professional' in low:
+        s += 6
+    return s
+
+
 async def resolve_cap_detail_content_frame(page: Page, log=None) -> UiContext:
     """
-    For county PDS CapDetail, real markup is almost always in iframe[name=ACAFrame].
-    Use this for soup snapshots so we do not fall back to a fat outer shell after expands.
+    Prefer the frame whose HTML looks like real CapDetail (nested iframe under ACAFrame wins
+    over an outer shell that only has scripts).
     """
+    best: Frame = page.main_frame
+    try:
+        main_h = await page.main_frame.content()
+    except Exception:
+        main_h = ''
+    best_s = _score_cap_detail_html(main_h or '')
+    for fr in list(page.frames):
+        if fr == page.main_frame:
+            continue
+        try:
+            h = await fr.content()
+            sc = _score_cap_detail_html(h or '')
+            if sc > best_s:
+                best_s = sc
+                best = fr
+        except Exception:
+            continue
+    if log is not None and best_s >= 20:
+        nm = (getattr(best, 'name', None) or '').strip() or '(no name)'
+        log.info(f'  CapDetail frame score={best_s} name={nm!r} url={(best.url or "")[:88]}')
+    if best_s >= 20:
+        return best
+    # Fallback: named ACAFrame if present
     for fr in list(page.frames):
         nm = (getattr(fr, 'name', None) or '').strip().lower()
         if nm == 'acaframe':

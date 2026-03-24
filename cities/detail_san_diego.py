@@ -48,11 +48,12 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     except Exception:
         pass
     ctx = await wait_accela_detail_dom(detail_page, log)
+    ctx = await resolve_cap_detail_content_frame(detail_page, log)
 
     await pds_expand_record_more_details(ctx)
-    ctx = await wait_accela_detail_dom(detail_page, log=None)
-
+    await detail_page.wait_for_timeout(600)
     ctx = await resolve_cap_detail_content_frame(detail_page, log)
+
     html = await ctx.content()
     soup = BeautifulSoup(html, 'lxml')
 
@@ -117,16 +118,17 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
         if not (lead.get('description') or '').strip():
             lead['description'] = project_desc_clean
 
+    ctx = await resolve_cap_detail_content_frame(detail_page, log)
     await pds_expand_contacts_heading(ctx)
     await click_more_details_visible(ctx)
-    ctx = await wait_accela_detail_dom(detail_page, log=None)
+    await detail_page.wait_for_timeout(900)
     ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html2 = await ctx.content()
     soup2 = BeautifulSoup(html2, 'lxml')
     parse_owner_contacts_soup(soup2, lead)
 
     await pds_expand_application_information_heading(ctx)
-    ctx = await wait_accela_detail_dom(detail_page, log=None)
+    await detail_page.wait_for_timeout(2200)
     ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html_app = await ctx.content()
     soup_app = BeautifulSoup(html_app, 'lxml')
