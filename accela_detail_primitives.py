@@ -99,13 +99,28 @@ def clean_accela_job_value(val: str) -> str:
     return s
 
 
+def _clean_el_text(el) -> str:
+    """
+    Return visible text of a BS4 element with all <script> and <style>
+    tags removed first.  Accela search forms embed inline JS (e.g.
+    shWorkLocation searchWaterMark) directly inside value <td> cells;
+    get_text() on the raw element returns the JS blob as part of the
+    address string.
+    """
+    import copy as _copy
+    el2 = _copy.copy(el)
+    for tag in el2.find_all(['script', 'style']):
+        tag.decompose()
+    return el2.get_text(separator=' ', strip=True)
+
+
 def extract_work_location_accela(soup):
     w = get_field_from_soup(soup, 'Work Location')
     if w:
         return w
 
     for el in soup.find_all(['td', 'div', 'span']):
-        txt = el.get_text(separator='\n', strip=True)
+        txt = _clean_el_text(el)
         if not txt:
             continue
         first = txt.split('\n')[0].strip().lower().rstrip(':')
@@ -115,33 +130,33 @@ def extract_work_location_accela(soup):
                 return '\n'.join(lines[1:])
 
     for el in soup.find_all(['span', 'td', 'div', 'th', 'label', 'strong']):
-        raw = el.get_text(strip=True)
+        raw = _clean_el_text(el)
         low = raw.lower().rstrip(':').strip()
         if low != 'work location':
             continue
         nxt = el.find_next_sibling()
         if nxt and getattr(nxt, 'get_text', None):
-            val = nxt.get_text(separator=' ', strip=True)
+            val = _clean_el_text(nxt)
             if val:
                 return val
         tr = el.find_parent('tr')
         if tr:
             ntr = tr.find_next_sibling('tr')
             if ntr:
-                val = ntr.get_text(separator=' ', strip=True)
+                val = _clean_el_text(ntr)
                 if val:
                     return val
             tds = tr.find_all('td')
             for i, td in enumerate(tds):
                 if 'work location' in td.get_text().lower() and i + 1 < len(tds):
-                    val2 = tds[i + 1].get_text(separator=' ', strip=True)
+                    val2 = _clean_el_text(tds[i + 1])
                     if val2 and 'work location' not in val2.lower():
                         return val2
         par = el.find_parent('div')
         if par:
             for sib in el.find_next_siblings():
                 if getattr(sib, 'get_text', None):
-                    val = sib.get_text(separator=' ', strip=True)
+                    val = _clean_el_text(sib)
                     if val:
                         return val
     return ''

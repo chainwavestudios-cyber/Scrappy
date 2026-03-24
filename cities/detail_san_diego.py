@@ -121,14 +121,37 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     ctx = await resolve_cap_detail_content_frame(detail_page, log)
     await pds_expand_contacts_heading(ctx)
     await click_more_details_visible(ctx)
-    await detail_page.wait_for_timeout(900)
+    # Wait for "Owner on Application" to appear in the DOM before reading it.
+    for _ in range(12):
+        await detail_page.wait_for_timeout(400)
+        ctx = await resolve_cap_detail_content_frame(detail_page, log)
+        probe = await ctx.evaluate("""
+            () => (document.body && document.body.innerText || '')
+                    .toLowerCase().includes('owner on application')
+        """)
+        if probe:
+            break
     ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html2 = await ctx.content()
     soup2 = BeautifulSoup(html2, 'lxml')
     parse_owner_contacts_soup(soup2, lead)
 
     await pds_expand_application_information_heading(ctx)
-    await detail_page.wait_for_timeout(2200)
+    # Wait for the ASI panel content to actually render in the DOM.
+    # "Rounded Kilowatts" or the lblASIList table must appear; fall back to
+    # a 4-second hard wait if the portal is slow.
+    for _ in range(12):
+        await detail_page.wait_for_timeout(400)
+        ctx = await resolve_cap_detail_content_frame(detail_page, log)
+        probe = await ctx.evaluate("""
+            () => {
+                const t = (document.body && document.body.innerText || '').toLowerCase();
+                return t.includes('kilowatt') || t.includes('electrical service') ||
+                       t.includes('advanced energy storage') || t.includes('lblasilist');
+            }
+        """)
+        if probe:
+            break
     ctx = await resolve_cap_detail_content_frame(detail_page, log)
     html_app = await ctx.content()
     soup_app = BeautifulSoup(html_app, 'lxml')

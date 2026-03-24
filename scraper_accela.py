@@ -525,6 +525,8 @@ async def _wait_accela_results_after_search(search, city_name: str, timeout_ms: 
 async def scrape_accela_async(config: dict, start_date: str, end_date: str):
     base_url  = config['base_url']
     module    = config['module']
+    # CapDetail URLs must use the record's module (e.g. SD PDS permits → PDS, not Building).
+    detail_module = (config.get('cap_detail_module') or module or '').strip() or module
     city_name = config['name']
     source    = config['source']
 
@@ -707,16 +709,16 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             csv_path = None
             if config.get('skip_csv_download'):
                 log.info(f'[{city_name}] skip_csv_download set — using HTML grid only')
-                leads = await _scrape_rows(search, source, base_url, module, config)
+                leads = await _scrape_rows(search, source, base_url, detail_module, config)
             else:
                 try:
                     csv_path = await _download_accela_results_csv(search, city_name, source)
                     leads = _leads_from_accela_csv_path(
-                        csv_path, config, source, base_url, module,
+                        csv_path, config, source, base_url, detail_module,
                     )
                 except Exception as e:
                     log.warning(f'[{city_name}] CSV export failed, using HTML grid: {e}')
-                    leads = await _scrape_rows(search, source, base_url, module, config)
+                    leads = await _scrape_rows(search, source, base_url, detail_module, config)
                 finally:
                     if csv_path and os.path.isfile(csv_path):
                         try:
@@ -731,7 +733,7 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     permit_num = lead.get('permitNumber')
                     if not permit_num:
                         continue
-                    resolve_permit_url_from_href(base_url, permit_num, module, lead)
+                    resolve_permit_url_from_href(base_url, permit_num, detail_module, lead)
                     _set_defaults(lead)
             else:
                 # Reuse the same browser context as search/CSV export — Accela (esp. county PDS)
@@ -744,7 +746,7 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     detail_page = await context.new_page()
                     try:
                         await _get_permit_details(
-                            detail_page, base_url, module, permit_num, lead, config,
+                            detail_page, base_url, detail_module, permit_num, lead, config,
                         )
                     except Exception as e:
                         log.error(f'[{city_name}] Detail failed {permit_num}: {e}')

@@ -17,7 +17,9 @@ CONFIGS = {
         # Default.aspx: click PDS entry, then use iframe (or main) where Accela form lives
         'portal_pds_iframe':  True,
         'pds_entry_link_names': ['PDS'],
+        # CapHome/search may reference Building; CapDetail for PDS records needs module=PDS.
         'module':             'Building',
+        'cap_detail_module':  'PDS',
         # Dropdown label must match portal option text (see ddlGSPermitType)
         'permit_type':        'Residential Alteration or Addition - Plan Check-Permit',
         # Always narrow Accela search to OTC project name
@@ -46,6 +48,7 @@ CONFIGS = {
         'portal_pds_iframe':  True,
         'pds_entry_link_names': ['PDS'],
         'module':             'Building',
+        'cap_detail_module':  'PDS',
         # Must match ddl option text (portal uses Plan Check-Permit, not "- PI")
         'permit_type':        'Commercial Alteration or Addition - Plan Check-Permit',
         'use_project_name':   None,
