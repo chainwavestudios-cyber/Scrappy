@@ -162,6 +162,17 @@ async def wait_accela_detail_dom(page: Page, log=None, attempts: int = 30) -> Ui
     """
     ctx: Optional[Frame] = None
     for i in range(attempts):
+        # DIAGNOSTIC: log all frames on first two attempts
+        if i < 2 and log is not None:
+            frame_info = []
+            for fr in list(page.frames):
+                nm = (getattr(fr, 'name', None) or '').strip()
+                try:
+                    h = await fr.content()
+                    frame_info.append(f'name={nm!r} len={len(h)} pm={"placeholdermain" in h.lower()} url={(fr.url or "")[:80]}')
+                except Exception as e:
+                    frame_info.append(f'name={nm!r} err={e}')
+            log.info(f'  [wait_dom attempt={i}] frames: {" | ".join(frame_info)}')
         # San Diego PDS: CapDetail lives in iframe[name="ACAFrame"] — prefer it over a fat shell.
         for fr in list(page.frames):
             nm = (getattr(fr, 'name', None) or '').strip().lower()
