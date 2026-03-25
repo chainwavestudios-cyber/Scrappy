@@ -113,28 +113,24 @@ def _parse_owner_block(soup) -> dict:
         if len(data_lines) >= 8:
             break
 
-    # DEBUG: log data_lines to see what the portal gives us
-    import logging as _log
-    _log.getLogger(__name__).info(f'  [owner_block] data_lines={data_lines[:6]}')
+    # SD portal renders the contact block as:
+    #   line 0: First name
+    #   line 1: Last name
+    #   line 2: Street address
+    #   line 3: City, State, ZIP
+    #   line 4+: optional labels like "Primary Phone:" followed by value on next line
 
-    # Name: first non-empty line after heading that looks like a name (no digits, no @)
-    # SD portal sometimes renders full name as 'FIRST LAST' on one line
-    name_line = ''
+    # Name: first two non-digit, non-@ lines are first and last name
+    name_lines = []
     for ln in data_lines:
-        if not re.search(r'[\d@/\\]', ln) and len(ln.split()) >= 1 and len(ln) < 60:
-            name_line = ln
-            break
+        if not re.search(r'[\d@/\\:]', ln) and len(ln.split()) >= 1 and len(ln) < 60:
+            name_lines.append(ln)
+            if len(name_lines) == 2:
+                break
 
-    if name_line:
-        # Handle "LAST, FIRST" or "FIRST LAST"
-        if ',' in name_line:
-            parts = [p.strip() for p in name_line.split(',', 1)]
-            result['lastName'] = parts[0].title()
-            result['firstName'] = parts[1].title() if len(parts) > 1 else ''
-        else:
-            parts = name_line.split()
-            result['firstName'] = parts[0].title()
-            result['lastName'] = ' '.join(parts[1:]).title() if len(parts) > 1 else ''
+    if name_lines:
+        result['firstName'] = name_lines[0].strip().title()
+        result['lastName'] = name_lines[1].strip().title() if len(name_lines) > 1 else ''
 
     # Email: line containing @
     for ln in data_lines:
@@ -142,11 +138,31 @@ def _parse_owner_block(soup) -> dict:
             result['email'] = ln.strip()
             break
 
-    # Phone: line that looks like a phone number
-    for ln in data_lines:
+    # Phone: either a bare 10-digit line, or a "Primary Phone:" / "Business Phone:" label
+    # where the value is on the same line after the colon or on the very next line
+    for i, ln in enumerate(data_lines):
+        # Label pattern: "Primary Phone: 6196543834" or "Primary Phone:" + next line
+        phone_label = re.match(r'(?:primary|business|cell|mobile|home)\s+phone\s*:?\s*(.*)', ln, re.I)
+        if phone_label:
+            val = phone_label.group(1).strip()
+            if not val and i + 1 < len(data_lines):
+                val = data_lines[i + 1].strip()
+            digits = re.sub(r'\D', '', val)
+            if len(digits) >= 10:
+                result['phone'] = val
+                break
+        # Bare digits line
         digits = re.sub(r'\D', '', ln)
-        if len(digits) >= 10:
+        if len(digits) >= 10 and not re.search(r'[a-zA-Z]', ln):
             result['phone'] = ln.strip()
+            break
+
+    # ZIP: pull from the City, State, ZIP line (line 3 typically)
+    # e.g. "Ramona, CA, 92065" or "Spring Valley, CA 91977"
+    for ln in data_lines:
+        m = re.search(r'(?:CA|California)[,\s]+(\d{5})\b', ln, re.I)
+        if m:
+            result['zip'] = m.group(1)
             break
 
     return result
@@ -244,6 +260,9 @@ async def fetch_permit_detail(detail_page, base_url, module, permit_num, lead, c
     lead['homeownerLastName'] = owner['lastName']
     lead['homeownerEmail'] = owner['email'] or None
     lead['homeownerPhone'] = owner['phone'] or None
+    # Use ZIP from contact block if address didn't have one
+    if owner.get('zip') and not (lead.get('zipCode') or '').strip():
+        lead['zipCode'] = owner['zip']
 
     # ── Step 3: Click "Application Information" expand ──
     await ctx.evaluate("""
