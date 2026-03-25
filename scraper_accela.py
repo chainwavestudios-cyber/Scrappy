@@ -739,12 +739,23 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
             else:
                 # Reuse the same browser context as search/CSV export — Accela (esp. county PDS)
                 # ties session cookies to Citizen Access; a fresh context yields empty/login detail pages.
+                # For portal_pds_iframe cities (e.g. SD), CapDetail must be loaded
+                # within the same page that navigated through the PDS entry — a new_page()
+                # in the same context still gets an Error.aspx because the portal checks
+                # the navigation chain, not just cookies. Reuse the search page for these.
+                use_same_page = bool(config.get('portal_pds_iframe'))
+
                 for i, lead in enumerate(leads):
                     permit_num = lead.get('permitNumber')
                     if not permit_num:
                         continue
                     log.info(f'[{city_name}] Details {permit_num} ({i+1}/{len(leads)})...')
-                    detail_page = await context.new_page()
+                    if use_same_page:
+                        detail_page = page
+                        close_after = False
+                    else:
+                        detail_page = await context.new_page()
+                        close_after = True
                     try:
                         await _get_permit_details(
                             detail_page, base_url, detail_module, permit_num, lead, config,
@@ -753,7 +764,8 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                         log.error(f'[{city_name}] Detail failed {permit_num}: {e}')
                         _set_defaults(lead)
                     finally:
-                        await detail_page.close()
+                        if close_after:
+                            await detail_page.close()
 
             leads = [l for l in leads if not l.get('_skip_ingest')]
             # Strip internal flags before returning
