@@ -717,6 +717,36 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     leads = _leads_from_accela_csv_path(
                         csv_path, config, source, base_url, detail_module,
                     )
+                    # For PDS iframe portals (e.g. SD), the constructed CapDetail URL is
+                    # rejected with Error.aspx. Harvest real hrefs from the grid while
+                    # we still have the results page loaded, then match to leads by permit num.
+                    if config.get('portal_pds_iframe') and leads:
+                        try:
+                            grid_hrefs = await search.evaluate("""
+                                () => {
+                                    const rows = document.querySelectorAll(
+                                        'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row, tr[class*="PermitList"]'
+                                    );
+                                    const out = {};
+                                    rows.forEach(row => {
+                                        const a = row.querySelector('a[href]');
+                                        if (!a) return;
+                                        const href = a.getAttribute('href') || '';
+                                        const text = a.textContent.trim();
+                                        if (text) out[text] = href;
+                                    });
+                                    return out;
+                                }
+                            """)
+                            matched = 0
+                            for lead in leads:
+                                pn = lead.get('permitNumber', '')
+                                if pn and pn in grid_hrefs:
+                                    lead['detailHref'] = grid_hrefs[pn]
+                                    matched += 1
+                            log.info(f'[{city_name}] Harvested {len(grid_hrefs)} grid hrefs, matched {matched}/{len(leads)} leads')
+                        except Exception as e:
+                            log.warning(f'[{city_name}] Could not harvest grid hrefs: {e}')
                 except Exception as e:
                     log.warning(f'[{city_name}] CSV export failed, using HTML grid: {e}')
                     leads = await _scrape_rows(search, source, base_url, detail_module, config)
