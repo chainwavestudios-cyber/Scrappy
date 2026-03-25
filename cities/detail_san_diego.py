@@ -50,13 +50,25 @@ def _block_after_heading(soup, heading: str) -> str:
 
 
 def _td_value_after_label(soup, label_lc: str) -> str:
-    """Standard Accela label/value <td> pair."""
+    """Accela label/value <td> pair. Case-insensitive, strips colons, partial match allowed."""
+    label_lc = label_lc.lower().strip().rstrip(':')
     for tr in soup.find_all('tr'):
         cells = tr.find_all(['td', 'th'])
         if len(cells) < 2:
             continue
-        if cells[0].get_text(strip=True).lower().rstrip(':').strip() == label_lc:
-            return cells[1].get_text(strip=True)
+        cell_text = cells[0].get_text(separator=' ', strip=True).lower().rstrip(':').strip()
+        if cell_text == label_lc or label_lc in cell_text:
+            val = cells[1].get_text(separator=' ', strip=True)
+            if val:
+                return val
+    # Fallback: labeled element -> next sibling
+    for el in soup.find_all(['td', 'div', 'span', 'label']):
+        if el.get_text(separator=' ', strip=True).lower().rstrip(':').strip() == label_lc:
+            nxt = el.find_next_sibling()
+            if nxt:
+                val = nxt.get_text(separator=' ', strip=True)
+                if val:
+                    return val
     return ''
 
 

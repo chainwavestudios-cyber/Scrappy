@@ -722,29 +722,50 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                     # we still have the results page loaded, then match to leads by permit num.
                     if config.get('portal_pds_iframe') and leads:
                         try:
-                            grid_hrefs = await search.evaluate("""
-                                () => {
-                                    const rows = document.querySelectorAll(
-                                        'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row, tr[class*="PermitList"]'
-                                    );
-                                    const out = {};
-                                    rows.forEach(row => {
-                                        const a = row.querySelector('a[href]');
-                                        if (!a) return;
-                                        const href = a.getAttribute('href') || '';
-                                        const text = a.textContent.trim();
-                                        if (text) out[text] = href;
-                                    });
-                                    return out;
-                                }
-                            """)
+                            # Paginate through ALL grid pages to collect every href before CSV parse.
+                            # SD portal rejects CapDetail?altId= URLs; only the session-signed
+                            # hrefs from the grid work (Module=LUEG-PDS&capID1=...&capID3=...).
+                            all_hrefs = {}
+                            harvest_page = 1
+                            while True:
+                                page_hrefs = await search.evaluate("""
+                                    () => {
+                                        const rows = document.querySelectorAll(
+                                            'tr.ACA_TabRow_Odd, tr.ACA_TabRow_Even, tr.gdvPermitList_Row, tr[class*="PermitList"]'
+                                        );
+                                        const out = {};
+                                        rows.forEach(row => {
+                                            const a = row.querySelector('a[href]');
+                                            if (!a) return;
+                                            const href = a.getAttribute('href') || '';
+                                            const text = a.textContent.trim();
+                                            if (text) out[text] = href;
+                                        });
+                                        return out;
+                                    }
+                                """)
+                                all_hrefs.update(page_hrefs)
+                                log.info(f'[{city_name}] Grid page {harvest_page}: harvested {len(page_hrefs)} hrefs (total {len(all_hrefs)})')
+                                # Check for next page link
+                                has_next = await search.evaluate(f"""
+                                    () => !!document.querySelector('a[href*="Page$"][title="{harvest_page + 1}"], a:not([href="#"]):not([href="javascript:void(0)"]):not([href="javascript:;"])')
+                                        && Array.from(document.querySelectorAll('a')).some(a => a.textContent.trim() === '{harvest_page + 1}')
+                                """)
+                                if not has_next:
+                                    break
+                                try:
+                                    await search.click(f'a:text-is("{harvest_page + 1}")', timeout=5000)
+                                    await _wait_accela_results_after_search(search, city_name, timeout_ms=30000)
+                                    harvest_page += 1
+                                except Exception:
+                                    break
                             matched = 0
                             for lead in leads:
                                 pn = lead.get('permitNumber', '')
-                                if pn and pn in grid_hrefs:
-                                    lead['detailHref'] = grid_hrefs[pn]
+                                if pn and pn in all_hrefs:
+                                    lead['detailHref'] = all_hrefs[pn]
                                     matched += 1
-                            log.info(f'[{city_name}] Harvested {len(grid_hrefs)} grid hrefs, matched {matched}/{len(leads)} leads')
+                            log.info(f'[{city_name}] Total grid hrefs: {len(all_hrefs)}, matched {matched}/{len(leads)} leads')
                         except Exception as e:
                             log.warning(f'[{city_name}] Could not harvest grid hrefs: {e}')
                 except Exception as e:
