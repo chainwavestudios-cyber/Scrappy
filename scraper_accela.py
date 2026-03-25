@@ -765,7 +765,10 @@ async def scrape_accela_async(config: dict, start_date: str, end_date: str):
                                 if pn and pn in all_hrefs:
                                     lead['detailHref'] = all_hrefs[pn]
                                     matched += 1
+                            unmatched = [l.get('permitNumber','') for l in leads if not l.get('detailHref') and l.get('permitNumber')]
                             log.info(f'[{city_name}] Total grid hrefs: {len(all_hrefs)}, matched {matched}/{len(leads)} leads')
+                            if unmatched:
+                                log.info(f'[{city_name}] Unmatched permit#s: {unmatched[:5]} ... sample grid keys: {list(all_hrefs.keys())[:5]}')
                         except Exception as e:
                             log.warning(f'[{city_name}] Could not harvest grid hrefs: {e}')
                 except Exception as e:

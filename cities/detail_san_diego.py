@@ -114,9 +114,10 @@ def _parse_owner_block(soup) -> dict:
             break
 
     # Name: first non-empty line after heading that looks like a name (no digits, no @)
+    # SD portal sometimes renders full name as 'FIRST LAST' on one line
     name_line = ''
     for ln in data_lines:
-        if not re.search(r'[\d@]', ln) and len(ln.split()) >= 1:
+        if not re.search(r'[\d@/\\]', ln) and len(ln.split()) >= 1 and len(ln) < 60:
             name_line = ln
             break
 
