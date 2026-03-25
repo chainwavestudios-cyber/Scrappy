@@ -113,6 +113,10 @@ def _parse_owner_block(soup) -> dict:
         if len(data_lines) >= 8:
             break
 
+    # DEBUG: log data_lines to see what the portal gives us
+    import logging as _log
+    _log.getLogger(__name__).info(f'  [owner_block] data_lines={data_lines[:6]}')
+
     # Name: first non-empty line after heading that looks like a name (no digits, no @)
     # SD portal sometimes renders full name as 'FIRST LAST' on one line
     name_line = ''
